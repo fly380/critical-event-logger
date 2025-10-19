@@ -3,12 +3,11 @@ name: Build & Release ZIP
 on:
   push:
     tags:
-      - 'v*'        # тригер на теги (v2.6.1, v2.7.0, ...)
-  workflow_dispatch:  # дозволяє запустити вручну з вкладки Actions
+      - 'v*'
+  workflow_dispatch:
 
-# <-- ОЦЕ ДОДАЛИ
 permissions:
-  contents: write     # дає GITHUB_TOKEN право створювати релізи/завантажувати файли
+  contents: write
 
 jobs:
   build:
@@ -32,18 +31,30 @@ jobs:
             composer install --no-dev --prefer-dist --no-interaction
           fi
 
-      - name: Prepare build folder
+      # ✅ Копіюємо в build/ критично потрібні файли, ВИКЛЮЧАЮЧИ зайве
+      - name: Prepare build folder (rsync with excludes)
         run: |
           mkdir -p build/critical-event-logger
-          shopt -s dotglob extglob
-          cp -r !(build|.git|.github) build/critical-event-logger
+          rsync -a . build/critical-event-logger/ \
+            --delete \
+            --exclude '/.git/' \
+            --exclude '/.github/' \
+            --exclude '/.gitignore' \
+            --exclude '/.gitattributes' \
+            --exclude '/tests/' \
+            --exclude '/build/' \
+            --exclude '/composer.json' \
+            --exclude '/composer.lock' \
+            --exclude '/README' \
+            --exclude '/README.md'
 
       - name: Create zip
         working-directory: build
-        run: zip -r critical-event-logger.zip critical-event-logger
+        run: |
+          zip -r critical-event-logger.zip critical-event-logger
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: build/critical-event-logger.zip
-          token: ${{ secrets.GITHUB_TOKEN }}   # <-- ЯВНО передаємо токен дією
+          token: ${{ secrets.GITHUB_TOKEN }}

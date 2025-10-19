@@ -1,0 +1,45 @@
+name: Build & Release ZIP
+
+on:
+  push:
+    tags:
+      - 'v*'   # тригер на теги v2.6.1, v2.7.0 ...
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup PHP (optional)
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.1'
+          tools: composer
+
+      - name: Install Composer deps (optional)
+        run: |
+          if [ -f composer.json ]; then
+            composer install --no-dev --prefer-dist --no-interaction
+          fi
+
+      - name: Prepare build folder
+        run: |
+          mkdir -p build/critical-event-logger
+          shopt -s dotglob extglob
+          cp -r !(build|.git|.github) build/critical-event-logger
+
+      - name: Create zip
+        working-directory: build
+        run: zip -r critical-event-logger.zip critical-event-logger
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/critical-event-logger.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

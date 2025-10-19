@@ -8,6 +8,37 @@
 
 if (!defined('ABSPATH')) exit;
 
+// ---- Єдиний геттер ключа OpenAI (пріоритет: БД -> константа; врахуємо і $GLOBALS з intel) ----
+if (!function_exists('crit_get_option_or_const')) {
+	// Сумісно з critical-logger-intel.php (може вже існувати там)
+	function crit_get_option_or_const(string $const_name, string $option_name): string {
+		$opt = trim((string) get_option($option_name, ''));
+		if ($opt !== '') return $opt;
+
+		if (defined($const_name)) {
+			$val = trim((string) constant($const_name));
+			if ($val !== '') return $val;
+		}
+		return '';
+	}
+}
+
+/** Отримати OpenAI API key: спочатку з БД (crit_openai_key), потім з константи, потім з $GLOBALS['CL_AI_KEY'] */
+function crit_get_openai_key(): string {
+	static $key = null;
+	if ($key !== null) return $key;
+
+	// Якщо intel уже поклав ключ у $GLOBALS
+	if (isset($GLOBALS['CL_AI_KEY'])) {
+		$k = trim((string)$GLOBALS['CL_AI_KEY']);
+		if ($k !== '') { $key = $k; return $key; }
+	}
+
+	// Основний шлях: опція -> константа
+	$key = crit_get_option_or_const('CRIT_OPENAI_KEY', 'crit_openai_key');
+	return $key;
+}
+
 // --- допоміжні ---
 // 1) Розрізати файл на окремі записи навіть без \n між ними
 if (!function_exists('crit_split_log_entries')) {
@@ -278,8 +309,9 @@ function crit_guess_wp_cafile() {
  * Генерує аналітичний звіт через OpenAI API з 3 рівнями fallback і діагностикою
  */
 function crit_ai_analyze_logs_with_openai($lines) {
-	if (!defined('CRIT_OPENAI_KEY') || empty(CRIT_OPENAI_KEY)) {
-		return '⚠️ Відсутній API-ключ OpenAI (CRIT_OPENAI_KEY). Додай його у wp-config.php';
+	$apiKey = crit_get_openai_key();
+	if ($apiKey === '') {
+		return '⚠️ Відсутній API-ключ OpenAI. Додай його в налаштуваннях плагіна (опція crit_openai_key) або через константу CRIT_OPENAI_KEY у wp-config.php';
 	}
 
 	$prompt = "Ти — аналітик безпеки WordPress. Проаналізуй уривки журналів подій і дай короткий, чіткий звіт українською:\n"
@@ -303,7 +335,7 @@ function crit_ai_analyze_logs_with_openai($lines) {
 
 	$endpoint = 'https://api.openai.com/v1/chat/completions';
 	$headers  = [
-		'Authorization' => 'Bearer ' . CRIT_OPENAI_KEY,
+		'Authorization' => 'Bearer ' . $apiKey,
 		'Content-Type'  => 'application/json',
 		'Accept'		=> 'application/json',
 	];
@@ -499,6 +531,10 @@ function crit_http_post_raw_socket($url, array $payload, array $headers, $timeou
 	stream_set_timeout($fp, $timeout);
 
 	$body_json = json_encode($payload);
+
+	// Авторизаційний заголовок: беремо з $headers або з геттера
+	$authHeader = $headers['Authorization'] ?? ('Bearer ' . crit_get_openai_key());
+
 	// важливо: просимо identity, щоб уникнути gzip/deflate
 	$req_headers = [
 		"POST {$path} HTTP/1.1",
@@ -507,7 +543,7 @@ function crit_http_post_raw_socket($url, array $payload, array $headers, $timeou
 		"Accept: application/json",
 		"Accept-Encoding: identity",
 		"Content-Type: application/json",
-		"Authorization: Bearer " . CRIT_OPENAI_KEY,
+		"Authorization: {$authHeader}",
 		"Content-Length: " . strlen($body_json),
 		"Connection: close",
 		"",

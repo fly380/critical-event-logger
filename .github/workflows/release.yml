@@ -3,7 +3,12 @@ name: Build & Release ZIP
 on:
   push:
     tags:
-      - 'v*'   # тригер на теги v2.6.1, v2.7.0 ...
+      - 'v*'        # тригер на теги (v2.6.1, v2.7.0, ...)
+  workflow_dispatch:  # дозволяє запустити вручну з вкладки Actions
+
+# <-- ОЦЕ ДОДАЛИ
+permissions:
+  contents: write     # дає GITHUB_TOKEN право створювати релізи/завантажувати файли
 
 jobs:
   build:
@@ -41,5 +46,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: build/critical-event-logger.zip
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}   # <-- ЯВНО передаємо токен дією

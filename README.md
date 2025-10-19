@@ -22,6 +22,3 @@
 ## Оновлення (GitHub Releases)
 Плагін використовує **Plugin Update Checker**. Нові версії зʼявляються у *Dashboard → Updates*.
 
-## Розробка / Релізи
-- Підвищуйте `Version:` у `critical-logger.php`.
-- Створіть тег `vX.Y.Z` та запуште теги — GitHub Actions збере ZIP і створить Release.

@@ -17,7 +17,7 @@
  * Domain Path: /languages
  * Copyright © 2025 Казмірчук Андрій
  */
- 
+
 if ( is_admin() ) {
 	// 1) Підключаємо PUC — або через Composer, або через локальну папку plugin-update-checker/.
 	if ( file_exists( __DIR__ . '/vendor/autoload.php' ) ) {

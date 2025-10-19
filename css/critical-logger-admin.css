@@ -1,0 +1,5 @@
+/* css/critical-logger-admin.css */
+.crit-ip-danger { background-color: #ffdddd !important; }
+.crit-ip-warning { background-color: #fff4cc !important; }
+.crit-ip-safe { background-color: transparent !important; }
+.crit-score-cell { font-weight: 700; }

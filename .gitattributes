@@ -10,5 +10,5 @@ tests/             export-ignore
 .gitignore         export-ignore
 .editorconfig      export-ignore
 composer.lock      export-ignore
-composer.json      export-ignore
 README.md          export-ignore
+composer.json      export-ignore

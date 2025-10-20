@@ -3,7 +3,7 @@
  * Plugin Name: Critical Event Logger
  * Plugin URI: https://github.com/fly380/critical-event-logger
  * Description: Логування критичних подій із швидким AJAX-переглядом, парсером «склеєних» рядків, частотністю IP, Geo/пул-визначенням, ручним блокуванням (.htaccess для Apache 2.2/2.4), ротацією й очищенням логів, GeoBlock та опційними AI-інсайтами.
- * Version: 2.6.5
+ * Version: 2.6.6
  * Author: Казмірчук Андрій
  * Author URI: https://www.facebook.com/fly380/
  * Text Domain: fly380

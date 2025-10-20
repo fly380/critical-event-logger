@@ -9,7 +9,7 @@
 if (!defined('ABSPATH')) exit;
 
 /* 1) Підключаємо функціонал інтел-аналізу */
-$intel_core = plugin_dir_path(__FILE__) . 'critical-logger-intel.php';
+$intel_core = plugin_dir_path(__FILE__) . 'intel.php';
 if (file_exists($intel_core)) require_once $intel_core;
 
 /* 2) AJAX: таблиця інтел-аналізу (окремо від головної сторінки) */

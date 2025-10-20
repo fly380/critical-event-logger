@@ -3,3 +3,4 @@
 .crit-ip-warning { background-color: #fff4cc !important; }
 .crit-ip-safe { background-color: transparent !important; }
 .crit-score-cell { font-weight: 700; }
+.crit-samples-row { background:#fafafa; }

@@ -177,10 +177,10 @@ function critical_logger_detected_ips_cb() {
 	$log_file = plugin_dir_path(__FILE__) . 'logs/events.log';
 	if (! file_exists($log_file)) wp_send_json_error('Лог-файл не знайдено', 404);
 
-	$raw = @file_get_contents($log_file) ?: '';
-	$all_lines = crit_split_log_entries($raw);
+	// Беремо тільки останні N записів для швидкості (можеш підкрутити за необхідності)
+	$entries   = crit_tail_entries($log_file, 2000);
 	$ip_counts = [];
-	foreach ($all_lines as $ln) {
+	foreach ($entries as $ln) {
 		if (preg_match('/\b(?:\d{1,3}\.){3}\d{1,3}\b/', $ln, $m)) {
 			$ip_counts[$m[0]] = ($ip_counts[$m[0]] ?? 0) + 1;
 		}
@@ -189,7 +189,6 @@ function critical_logger_detected_ips_cb() {
 
 	ob_start();
 	if ($ip_counts) {
-		// ПОВЕРТАЄМО ЛИШЕ ТАБЛИЦЮ — без додаткового <div>
 		echo '<table class="widefat striped" style="width:100%;">';
 		echo '<thead><tr>
 				<th>IP</th>
@@ -206,17 +205,15 @@ function critical_logger_detected_ips_cb() {
 			echo '<td style="' . esc_attr($color) . '">' . esc_html($fip) . '</td>';
 			echo '<td>' . intval($cnt) . '</td>';
 			echo '<td class="crit-pool" data-ip="' . esc_attr($fip) . '"><em style="color:#888">…</em></td>';
-			echo '<td class="crit-geo"data-ip="' . esc_attr($fip) . '"><em style="color:#888">…</em></td>';
+			echo '<td class="crit-geo" data-ip="' . esc_attr($fip) . '"><em style="color:#888">…</em></td>';
 			echo '<td>';
 
-			// Кнопка "Блокувати" — одиночний IP
 			echo '<form method="post" style="display:inline; margin-right:4px;">' .
 				 wp_nonce_field('manual_block_ip_action', 'manual_block_ip_nonce', true, false) .
 				 '<input type="hidden" name="manual_ip_address" value="' . esc_attr($fip) . '">' .
 				 '<input type="submit" name="manual_block_ip" class="button button-small" value="Блокувати">' .
 			'</form>';
 
-			// Кнопка "Блокувати пул" — hidden порожній, кнопка вимкнена (JS підставить пул і увімкне)
 			echo '<form method="post" class="js-block-pool-form" data-ip="' . esc_attr($fip) . '" style="display:inline;">' .
 				 wp_nonce_field('manual_block_ip_action', 'manual_block_ip_nonce', true, false) .
 				 '<input type="hidden" name="manual_ip_address" class="js-pool-input" value="">' .
@@ -234,8 +231,6 @@ function critical_logger_detected_ips_cb() {
 	$html = ob_get_clean();
 	wp_send_json_success(['html' => $html]);
 }
-
-
 
 /* === AJAX: головна таблиця лога (частина сторінки) === */
 add_action('wp_ajax_critical_logger_log_table', 'critical_logger_log_table_cb');
@@ -305,21 +300,15 @@ function critical_logger_log_table_cb() {
 
 /* AJAX: оновити textarea з логами (старий handler — зберіг) */
 add_action('wp_ajax_critical_logger_reload_logs', 'critical_logger_reload_logs_callback');
-
 function critical_logger_reload_logs_callback() {
-	if (! current_user_can('manage_options')) {
-		wp_send_json_error('Недостатньо прав', 403);
-	}
-
+	if (! current_user_can('manage_options')) wp_send_json_error('Недостатньо прав', 403);
 	check_ajax_referer('critical_logger_simple_nonce', 'nonce');
 
 	$log_file = plugin_dir_path(__FILE__) . 'logs/events.log';
-	if (! file_exists($log_file)) {
-		wp_send_json_error('Лог-файл не знайдено', 404);
-	}
+	if (! file_exists($log_file)) wp_send_json_error('Лог-файл не знайдено', 404);
 
-	$raw = @file_get_contents($log_file) ?: '';
-	$lines = crit_split_log_entries($raw);
+	$limit  = isset($_POST['limit']) ? max(50, min(5000, intval($_POST['limit']))) : 500;
+	$lines  = crit_tail_entries($log_file, $limit);
 	wp_send_json_success(array_values($lines));
 }
 
@@ -381,53 +370,152 @@ add_action('admin_enqueue_scripts', function($hook) {
 	));
 });
 
+if (!function_exists('crit_cidr_range_from_prefix')) {
+	function crit_cidr_range_from_prefix($prefixIp, $length) {
+		if (!filter_var($prefixIp, FILTER_VALIDATE_IP) || $length < 0 || $length > 32) return [null, null];
+		$start = ip2long($prefixIp);
+		if ($start === false) return [null, null];
+		$mask = $length == 0 ? 0 : ((~0 << (32 - $length)) & 0xFFFFFFFF); // безпечно для PHP 7.2–8.3
+		$network = $start & $mask;
+		$broadcast = $network | (~$mask & 0xFFFFFFFF);
+		return [long2ip($network), long2ip($broadcast)];
+	}
+}
+
 /**
  * ======= Точне визначення пулу через RDAP (офіційні реєстри) =======
  * 1) Пробуємо ARIN RDAP і дозволяємо редірект до потрібного RIR
  * 2) Якщо ні — пробуємо напряму RIPE RDAP
  * 3) Повертаємо строго startAddress-endAddress
  */
-function crit_get_ip_pool_via_rdap($ip) {
-	$cache_key = 'crit_pool_rdap_' . md5($ip);
+/**
+ * BGP-пул через Team Cymru (whois.cymru.com:43).
+ * Повертає діапазон за анонсованим BGP-префіксом (start-end).
+ * Кеш: 7 днів.
+ */
+function crit_get_ip_pool_via_cymru_bgp($ip) {
+	$cache_key = 'crit_pool_bgp_' . md5($ip);
 	$cached = get_transient($cache_key);
 	if ($cached !== false) return $cached;
 
-	$endpoints = array(
-		// ARIN зробить редірект у потрібний RIR
-		"https://rdap.arin.net/registry/ip/" . rawurlencode($ip),
-		// запасний прямий RIPE
-		"https://rdap.db.ripe.net/ip/" . rawurlencode($ip),
-	);
+	if (!filter_var($ip, FILTER_VALIDATE_IP)) return '';
 
-	foreach ($endpoints as $url) {
-		$resp = wp_remote_get($url, array(
-			'timeout'	=> 12,
-			'redirection'=> 5,
-			'headers'	=> array('Accept' => 'application/rdap+json, application/json'),
-		));
-		if (is_wp_error($resp)) continue;
+	$fp = @fsockopen('whois.cymru.com', 43, $errno, $errstr, 6);
+	if (!$fp) return '';
+	stream_set_timeout($fp, 6);
 
-		$code = wp_remote_retrieve_response_code($resp);
-		if ($code < 200 || $code >= 300) continue;
+	// " -v <ip>" — verbose одна лінія: AS | IP | BGP Prefix | CC | ...
+	fwrite($fp, " -v " . $ip . "\n");
+	$resp = '';
+	while (!feof($fp)) {
+		$line = fgets($fp, 4096);
+		if ($line === false) break;
+		$resp .= $line;
+	}
+	fclose($fp);
+	if ($resp === '') return '';
 
-		$body = wp_remote_retrieve_body($resp);
-		if (! $body) continue;
-
-		$data = json_decode($body, true);
-		if (! is_array($data)) continue;
-
-		// RDAP може повертати поля на верхньому рівні або всередині "network"
-		$start = $data['startAddress'] ?? ($data['network']['startAddress'] ?? null);
-		$end = $data['endAddress'] ?? ($data['network']['endAddress'] ?? null);
-
-		if ($start && $end && filter_var($start, FILTER_VALIDATE_IP) && filter_var($end, FILTER_VALIDATE_IP)) {
-			$range = $start . '-' . $end;
+	// Беремо перший CIDR типу a.b.c.d/n (це й буде "BGP Prefix")
+	if (preg_match('/\b(\d{1,3}(?:\.\d{1,3}){3}\/\d{1,2})\b/', $resp, $m)) {
+		list($pfx, $len) = explode('/', $m[1], 2);
+		if (!function_exists('crit_cidr_range_from_prefix')) {
+			// safety: якщо хелпер ще не визначений
+			function crit_cidr_range_from_prefix($prefixIp, $length) {
+				if (!filter_var($prefixIp, FILTER_VALIDATE_IP) || $length < 0 || $length > 32) return [null, null];
+				$start = ip2long($prefixIp);
+				if ($start === false) return [null, null];
+				$mask = $length == 0 ? 0 : ((~0 << (32 - $length)) & 0xFFFFFFFF);
+				$network = $start & $mask;
+				$broadcast = $network | (~$mask & 0xFFFFFFFF);
+				return [long2ip($network), long2ip($broadcast)];
+			}
+		}
+		[$s, $e] = crit_cidr_range_from_prefix($pfx, (int)$len);
+		if ($s && $e) {
+			$range = $s . '-' . $e;
 			set_transient($cache_key, $range, 7 * DAY_IN_SECONDS);
 			return $range;
 		}
 	}
+	return '';
+}
 
-	return ''; // нехай вирішує наступний шар
+function crit_get_ip_pool_via_rdap($ip) {
+	$cache_key = 'crit_pool_rdap_v2_' . md5($ip); // v2: знецінюємо старий кеш
+	$cached = get_transient($cache_key);
+	if ($cached !== false) return $cached;
+
+	$url = "https://rdap.arin.net/registry/ip/" . rawurlencode($ip); // ARIN редіректить у потрібний RIR
+	$max_hops = 5;
+	$seen = [];
+	$outer_range = '';
+
+	for ($i = 0; $i < $max_hops; $i++) {
+		$resp = wp_remote_get($url, [
+			'timeout'      => 12,
+			'redirection'  => 5,
+			'headers'      => ['Accept' => 'application/rdap+json, application/json'],
+		]);
+		if (is_wp_error($resp)) break;
+		$code = wp_remote_retrieve_response_code($resp);
+		if ($code < 200 || $code >= 300) break;
+
+		$data = json_decode(wp_remote_retrieve_body($resp), true);
+		if (!is_array($data)) break;
+
+		// Збираємо кандидатні діапазони
+		$ranges = [];
+
+		// ARIN-специфічні cidr0_cidrs → перетворюємо у start-end
+		if (!empty($data['cidr0_cidrs']) && is_array($data['cidr0_cidrs'])) {
+			foreach ($data['cidr0_cidrs'] as $cid) {
+				$pfx = $cid['v4prefix'] ?? '';
+				$len = isset($cid['length']) ? intval($cid['length']) : null;
+				if ($pfx && $len !== null) {
+					[$s, $e] = crit_cidr_range_from_prefix($pfx, $len);
+					if ($s && $e) $ranges[] = [$s, $e];
+				}
+			}
+		}
+
+		// Загальні RDAP-поля
+		$start = $data['startAddress'] ?? ($data['network']['startAddress'] ?? null);
+		$end   = $data['endAddress']   ?? ($data['network']['endAddress']   ?? null);
+		if ($start && $end) $ranges[] = [$start, $end];
+
+		// Обираємо НАЙШИРШИЙ із наявних на цьому вузлі
+		if ($ranges) {
+			$best = null; $best_span = -1;
+			foreach ($ranges as $r) {
+				if (!filter_var($r[0], FILTER_VALIDATE_IP) || !filter_var($r[1], FILTER_VALIDATE_IP)) continue;
+				$s = (float) sprintf('%u', ip2long($r[0]));
+				$e = (float) sprintf('%u', ip2long($r[1]));
+				$span = $e - $s;
+				if ($span > $best_span) { $best_span = $span; $best = $r; }
+			}
+			if ($best) $outer_range = $best[0] . '-' . $best[1];
+		}
+
+		// Йдемо догори, якщо є батьківський об'єкт
+		$up = '';
+		if (!empty($data['links']) && is_array($data['links'])) {
+			foreach ($data['links'] as $lnk) {
+				if (!empty($lnk['rel']) && strtolower($lnk['rel']) === 'up' && !empty($lnk['href'])) {
+					$up = $lnk['href'];
+					break;
+				}
+			}
+		}
+		if (!$up || isset($seen[$up])) break;
+		$seen[$up] = true;
+		$url = $up;
+	}
+
+	if ($outer_range) {
+		set_transient($cache_key, $outer_range, 7 * DAY_IN_SECONDS);
+		return $outer_range;
+	}
+	return '';
 }
 
 /**
@@ -457,7 +545,7 @@ function crit_get_ip_pool_via_whois_socket($ip) {
  * REST RIPE (fallback). ВАЖЛИВО: виправлено regex (не використовуємо кириличне \д)
  */
 function crit_get_ip_pool_via_ripe_precise($ip) {
-	$cache_key = 'crit_pool_ripe_precise_' . md5($ip);
+	$cache_key = 'crit_pool_ripe_precise_v2_' . md5($ip);
 	$cached = get_transient($cache_key);
 	if ($cached !== false) return $cached;
 
@@ -470,8 +558,7 @@ function crit_get_ip_pool_via_ripe_precise($ip) {
 	if (empty($data['objects']['object'])) return '';
 
 	$target = sprintf('%u', ip2long($ip));
-	$best_start = $best_end = null;
-	$best_span = PHP_INT_MAX;
+	$best_start = null; $best_end = null; $best_span = -1;
 
 	foreach ($data['objects']['object'] as $obj) {
 		foreach ($obj['attributes']['attribute'] ?? [] as $attr) {
@@ -479,24 +566,19 @@ function crit_get_ip_pool_via_ripe_precise($ip) {
 			if (!preg_match('/^(\d{1,3}(?:\.\d{1,3}){3})\s*-\s*(\d{1,3}(?:\.\d{1,3}){3})$/', trim($attr['value']), $m)) continue;
 
 			$start = sprintf('%u', ip2long($m[1]));
-			$end = sprintf('%u', ip2long($m[2]));
+			$end   = sprintf('%u', ip2long($m[2]));
 			if ($start <= $target && $target <= $end) {
 				$span = $end - $start;
-				if ($span < $best_span) {
-					$best_start = $start;
-					$best_end = $end;
-					$best_span = $span;
-				}
+				if ($span > $best_span) { $best_span = $span; $best_start = $start; $best_end = $end; }
 			}
 		}
 	}
 
-	if ($best_start && $best_end) {
+	if ($best_span >= 0) {
 		$range = long2ip($best_start) . '-' . long2ip($best_end);
 		set_transient($cache_key, $range, 7 * DAY_IN_SECONDS);
 		return $range;
 	}
-
 	return '';
 }
 
@@ -578,6 +660,10 @@ function crit_get_ip_pool_via_geoip($ip) {
  */
 function crit_get_ip_pool($ip) {
 	if (!filter_var($ip, FILTER_VALIDATE_IP)) return ['-'];
+	
+	// 0) BGP-префікс — найпридатніший для "пулу" в інтерфейсі
+	$bgp = crit_get_ip_pool_via_cymru_bgp($ip);
+	if (!empty($bgp)) return [$bgp];
 
 	// 1) RDAP
 	$rdap = crit_get_ip_pool_via_rdap($ip);
@@ -728,33 +814,49 @@ add_action('admin_init', function() {
 		critical_logger_cleanup_old_logs(30);
 
 		// Очистити лог
-		if (isset($_POST['clear_log']) && current_user_can('manage_options') && check_admin_referer('clear_log_action', 'clear_log_nonce')) {
+		if (
+			isset($_POST['clear_log']) &&
+			current_user_can('manage_options') &&
+			check_admin_referer('clear_log_action', 'clear_log_nonce')
+		) {
 			$log_file = plugin_dir_path(__FILE__) . 'logs/events.log';
 			file_put_contents($log_file, '', LOCK_EX);
 			wp_safe_redirect(add_query_arg('cleared', '1', menu_page_url('critical-event-logs', false)));
 			exit;
 		}
 
-		// Експорт у CSV
-		if (isset($_POST['export_csv']) && current_user_can('manage_options') && check_admin_referer('export_csv_action', 'export_csv_nonce')) {
-			$log_file = plugin_dir_path(__FILE__) . 'logs/events.log';
-			if (! file_exists($log_file)) wp_die('Лог-файл не знайдено для експорту.');
-
-			// Вивантаження CSV
-			if (! ob_get_level()) ob_start();
-			ob_end_clean();
-			header('Content-Type: text/csv; charset=utf-8');
-			header('Content-Disposition: attachment; filename=critical-logs-' . date('Y-m-d') . '.csv');
-			$output = fopen('php://output', 'w');
-			fputcsv($output, array('Event log'));
-			$raw = @file_get_contents($log_file) ?: '';
-			$lines = crit_split_log_entries($raw);
-			foreach ($lines as $line) fputcsv($output, array($line));
-			fclose($output);
-			exit;
-		}
+		// (за бажанням) тут може бути Експорт CSV — якщо треба, став потоком як ми обговорювали
 	}
 });
+/**
+ * Порахує кількість лог-записів у файлі, читаючи його порціями.
+ * Розпізнає записи за префіксом таймстемпа: [YYYY-MM-DD HH:MM:SS]
+ */
+function crit_count_entries_in_file(string $file, int $chunkSize = 131072): int {
+	if (!is_file($file)) return 0;
+	$fp = @fopen($file, 'rb');
+	if (!$fp) return 0;
+
+	$re  = '/\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]/';
+	$buf = '';
+	$cnt = 0;
+
+	while (!feof($fp)) {
+		$buf .= fread($fp, $chunkSize) ?: '';
+		$tailKeep = 64;
+		if (strlen($buf) > $chunkSize * 2) {
+			$scan = substr($buf, 0, -$tailKeep);
+			preg_match_all($re, $scan, $m);
+			$cnt += count($m[0]);
+			$buf = substr($buf, -$tailKeep);
+		}
+	}
+	preg_match_all($re, $buf, $m2);
+	$cnt += count($m2[0]);
+
+	fclose($fp);
+	return $cnt;
+}
 
 /* Головна адмін-сторінка для перегляду логів */
 function critical_logger_admin_page() {
@@ -971,29 +1073,26 @@ function critical_logger_admin_page() {
 		return;
 	}
 
-	$raw = @file_get_contents($log_file) ?: '';
-	$all_lines = crit_split_log_entries($raw);
-	$total_logs = count($all_lines);
+	$total_logs = crit_count_entries_in_file($log_file);
 
 	echo '<p>Всього записів: <strong>' . esc_html($total_logs) . '</strong></p>';
 
 	// Кнопки дій
 	echo '<div style="margin-bottom:12px;">';
 	echo '<button id="crit-reload-logs" type="button" class="button">Оновити</button> ';
-	echo '<form method="post" style="display:inline;">' . wp_nonce_field('critical_logger_clear_logs_action', 'critical_logger_clear_logs_nonce', true, false);
-	echo '<input type="hidden" name="clear_logs" value="1">';
-	echo '<input type="submit" class="button button-secondary" value="Очистити лог" onclick="return confirm(\'Очистити лог? Це незворотно.\');">';
-	echo '</form> ';
+	// 1) Очистити лог (як і було)
+	echo '<form method="post" style="display:inline; margin-left:8px;">'
+		. wp_nonce_field('critical_logger_clear_logs_action', 'critical_logger_clear_logs_nonce', true, false)
+		. '<input type="hidden" name="clear_logs" value="1">'
+		. '<input type="submit" class="button button-secondary" value="Очистити лог" onclick="return confirm(\'Очистити лог? Це незворотно.\');">'
+		. '</form>';
+	// 2) Очистити кеш пул (НОВА КНОПКА)
+echo '<form method="post" style="display:inline; margin-left:8px;">'
+		. wp_nonce_field('critical_logger_clear_ipcache_action', 'critical_logger_clear_ipcache_nonce', true, false)
+		. '<input type="hidden" name="clear_ipcache" value="1">'
+		. '<input type="submit" class="button" value="Очистити кеш пул" onclick="return confirm(\'Очистити кеш пул?\');">'
+		. '</form>';
 	echo '</div>';
-
-	// --- Підрахунок частоти IP ---
-	$ip_counts = [];
-	foreach ($all_lines as $ln) {
-		if (preg_match('/\b(?:\d{1,3}\.){3}\d{1,3}\b/', $ln, $m)) {
-			$ip_counts[$m[0]] = ($ip_counts[$m[0]] ?? 0) + 1;
-		}
-	}
-
 	// --- Таблиця логів (AJAX) ---
 	echo '<div style="max-height:270px; overflow-y:auto; border:1px solid #ddd; border-radius:6px; padding:6px; background:#fff;">';
 	echo '<div id="crit-log-container" style="padding:12px; color:#666;">Завантаження лога…</div>';
@@ -1123,24 +1222,26 @@ $(function(){
 
 	if (ob_get_level()) ob_end_flush();
 }
-if (file_exists(plugin_dir_path(__FILE__) . 'critical-logger-intel-admin.php')) {
-	require_once plugin_dir_path(__FILE__) . 'critical-logger-intel-admin.php';
+// Підключення intel аналізу
+if (file_exists(plugin_dir_path(__FILE__) . 'intel-admin.php')) {
+	require_once plugin_dir_path(__FILE__) . 'intel-admin.php';
 }
-if (file_exists(plugin_dir_path(__FILE__) . 'critical-logger-analytics.php')) {
-	require_once plugin_dir_path(__FILE__) . 'critical-logger-analytics.php';
-}
-if (file_exists(plugin_dir_path(__FILE__) . 'critical-logger-ai.php')) {
-	require_once plugin_dir_path(__FILE__) . 'critical-logger-ai.php';
+// Підключення AT налітики
+if (file_exists(plugin_dir_path(__FILE__) . 'ai.php')) {
+	require_once plugin_dir_path(__FILE__) . 'ai.php';
 }
 // Підключення GeoBlock
-if (file_exists(plugin_dir_path(__FILE__) . 'critical-logger-geoblock.php')) {
-	require_once plugin_dir_path(__FILE__) . 'critical-logger-geoblock.php';
+if (file_exists(plugin_dir_path(__FILE__) . 'geoblock.php')) {
+	require_once plugin_dir_path(__FILE__) . 'geoblock.php';
 }
 // === Ротація логів (автоочищення та архівація) ===
-if (file_exists(plugin_dir_path(__FILE__) . 'critical-logger-rotation.php')) {
-	require_once plugin_dir_path(__FILE__) . 'critical-logger-rotation.php';
+if (file_exists(plugin_dir_path(__FILE__) . 'rotation.php')) {
+	require_once plugin_dir_path(__FILE__) . 'rotation.php';
 }
 // Settings page (API keys)
-if (file_exists(plugin_dir_path(__FILE__) . 'critical-logger-seting.php')) {
-	require_once plugin_dir_path(__FILE__) . 'critical-logger-seting.php';
+if (file_exists(plugin_dir_path(__FILE__) . 'seting.php')) {
+	require_once plugin_dir_path(__FILE__) . 'seting.php';
+}
+if (file_exists(plugin_dir_path(__FILE__) . 'htaccess-blocklist.php')) {
+	require_once plugin_dir_path(__FILE__) . 'htaccess-blocklist.php';
 }

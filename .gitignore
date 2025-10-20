@@ -1,0 +1,21 @@
+# OS/IDE
+.DS_Store
+Thumbs.db
+/.idea/
+/.vscode/
+
+# збірка/залежності/логи
+/node_modules/
+/vendor/
+/dist/
+/build/
+*.map
+*.log
+
+# логи плагіна: лишаємо тільки заглушку
+logs/*
+!logs/index.php
+
+# секрети
+.env
+.env.*

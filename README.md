@@ -171,6 +171,9 @@ wp plugin activate critical-logger
    `docs/screenshot-3.png`
 4. **IP‑інтел** — коротка довідка по адресі.  
    `docs/screenshot-4.png`
+5. **AI аналітика логу** — коротка довідка по адресі.  
+   `docs/screenshot-5.png`
+   
 
 ---
 

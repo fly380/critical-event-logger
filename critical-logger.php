@@ -33,6 +33,39 @@ if ( is_admin() ) {
 			__FILE__,										   // головний файл плагіна
 			'critical-event-logger'							 // slug = назва папки плагіна
 		);
+		if ( class_exists( \YahnisElsts\PluginUpdateChecker\v5\PucFactory::class ) ) {
+	$updateChecker = \YahnisElsts\PluginUpdateChecker\v5\PucFactory::buildUpdateChecker(
+		'https://github.com/fly380/critical-event-logger',
+		__FILE__,
+		'critical-event-logger'
+	);
+	$updateChecker->getVcsApi()->enableReleaseAssets();
+	$updateChecker->setBranch('main');
+
+	// === Додаємо іконки/банери до модалки оновлення ===
+	$updateChecker->addResultFilter(function($info /* \YahnisElsts\PluginUpdateChecker\v5\Plugin\PluginInfo */, $result) {
+		$baseUrl  = plugin_dir_url(__FILE__) . 'assets/';
+		$basePath = plugin_dir_path(__FILE__) . 'assets/';
+
+		// ІКОНКИ
+		$icons = [];
+		if ( file_exists($basePath.'icon-128x128.png') ) $icons['1x'] = $baseUrl.'icon-128x128.png';
+		if ( file_exists($basePath.'icon-256x256.png') ) $icons['2x'] = $baseUrl.'icon-256x256.png';
+		if (!empty($icons)) {
+			$info->icons = array_merge((array)($info->icons ?? []), $icons);
+		}
+
+		// БАНЕРИ
+		$banners = [];
+		if ( file_exists($basePath.'banner-772x250.png') )  $banners['low']  = $baseUrl.'banner-772x250.png';
+		if ( file_exists($basePath.'banner-1544x500.png') ) $banners['high'] = $baseUrl.'banner-1544x500.png';
+		if (!empty($banners)) {
+			$info->banners = $banners;
+		}
+
+		return $info;
+	});
+}
 
 		// Брати ZIP з релізів:
 		$updateChecker->getVcsApi()->enableReleaseAssets();

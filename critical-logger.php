@@ -19,70 +19,59 @@
  */
 
 if ( is_admin() ) {
-	// 1) Підключаємо PUC — або через Composer, або через локальну папку plugin-update-checker/.
+	// Підключаємо PUC (Composer або локальна папка)
 	if ( file_exists( __DIR__ . '/vendor/autoload.php' ) ) {
 		require_once __DIR__ . '/vendor/autoload.php';
 	} elseif ( file_exists( __DIR__ . '/plugin-update-checker/plugin-update-checker.php' ) ) {
 		require_once __DIR__ . '/plugin-update-checker/plugin-update-checker.php';
 	}
 
-	// 2) Ініціалізуємо апдейтер (публічний репозиторій).
-	if ( class_exists( \YahnisElsts\PluginUpdateChecker\v5\PucFactory::class ) ) {
+	if ( class_exists(\YahnisElsts\PluginUpdateChecker\v5\PucFactory::class) ) {
 		$updateChecker = \YahnisElsts\PluginUpdateChecker\v5\PucFactory::buildUpdateChecker(
-			'https://github.com/fly380/critical-event-logger', // URL репозиторію
-			__FILE__,										   // головний файл плагіна
-			'critical-event-logger'							 // slug = назва папки плагіна
+			'https://github.com/fly380/critical-event-logger',
+			__FILE__,
+			'critical-event-logger'
 		);
-		if ( class_exists( \YahnisElsts\PluginUpdateChecker\v5\PucFactory::class ) ) {
-	$updateChecker = \YahnisElsts\PluginUpdateChecker\v5\PucFactory::buildUpdateChecker(
-		'https://github.com/fly380/critical-event-logger',
-		__FILE__,
-		'critical-event-logger'
-	);
-	$updateChecker->getVcsApi()->enableReleaseAssets();
-	$updateChecker->setBranch('main');
-
-	// === Додаємо іконки/банери до модалки оновлення ===
-	$updateChecker->addResultFilter(function($info /* \YahnisElsts\PluginUpdateChecker\v5\Plugin\PluginInfo */, $result) {
-		$baseUrl  = plugin_dir_url(__FILE__) . 'assets/';
-		$basePath = plugin_dir_path(__FILE__) . 'assets/';
-
-		// ІКОНКИ
-		$icons = [];
-		if ( file_exists($basePath.'icon-128x128.png') ) $icons['1x'] = $baseUrl.'icon-128x128.png';
-		if ( file_exists($basePath.'icon-256x256.png') ) $icons['2x'] = $baseUrl.'icon-256x256.png';
-		if (!empty($icons)) {
-			$info->icons = array_merge((array)($info->icons ?? []), $icons);
-		}
-
-		// БАНЕРИ
-		$banners = [];
-		if ( file_exists($basePath.'banner-772x250.png') )  $banners['low']  = $baseUrl.'banner-772x250.png';
-		if ( file_exists($basePath.'banner-1544x500.png') ) $banners['high'] = $baseUrl.'banner-1544x500.png';
-		if (!empty($banners)) {
-			$info->banners = $banners;
-		}
-
-		return $info;
-	});
-}
-
-		// Брати ZIP з релізів:
 		$updateChecker->getVcsApi()->enableReleaseAssets();
-
-		// Явно вкажемо гілку джерела (за потреби):
 		$updateChecker->setBranch('main');
-	}
-}
 
-defined('ABSPATH') || exit;
-if (!defined('CRIT_IP_EXPAND_MAX')) {
-	define('CRIT_IP_EXPAND_MAX', 65536); // ~ /16 — досить щедро
-}
-if (!function_exists('crit_log_internal')) {
-	function crit_log_internal($msg) {
-		// Лише для внутрішніх (не користувацьких) помилок плагіна
-		error_log('[CriticalLogger] ' . $msg);
+		// ---- Локальні іконки/банери ----
+		$assetsUrl  = plugin_dir_url(__FILE__)  . 'assets/';
+		$assetsPath = plugin_dir_path(__FILE__) . 'assets/';
+
+		$icons = [];
+		if ( file_exists($assetsPath . 'icon-128x128.png') ) { $icons['1x'] = $assetsUrl . 'icon-128x128.png'; }
+		if ( file_exists($assetsPath . 'icon-256x256.png') ) { $icons['2x'] = $assetsUrl . 'icon-256x256.png'; }
+
+		$banners = [];
+		if ( file_exists($assetsPath . 'banner-772x250.png') )  { $banners['low']  = $assetsUrl . 'banner-772x250.png'; }
+		if ( file_exists($assetsPath . 'banner-1544x500.png') ) { $banners['high'] = $assetsUrl . 'banner-1544x500.png'; }
+
+		// 1) Модалка "Переглянути деталі версії"
+		$updateChecker->addResultFilter(function($info) use ($icons, $banners) {
+			if (!empty($icons))   { $info->icons   = array_merge((array)($info->icons ?? []),   $icons); }
+			if (!empty($banners)) { $info->banners = array_merge((array)($info->banners ?? []), $banners); }
+			return $info;
+		});
+
+		// 2) Рядок оновлення у списку плагінів
+		$updateChecker->addFilter('pre_inject_update', function($update) use ($icons, $banners) {
+			if ($update) {
+				if (!empty($icons))   { $update->icons   = $icons; }
+				if (!empty($banners)) { $update->banners = $banners; }
+			}
+			return $update;
+		});
+
+		// 3) Підстраховка: доклеїти у transient, якщо щось перетреться
+		add_filter('site_transient_update_plugins', function($transient) use ($icons, $banners) {
+			$pluginFile = plugin_basename(__FILE__);
+			if ( isset($transient->response[$pluginFile]) ) {
+				if (!empty($icons)   && empty($transient->response[$pluginFile]->icons))   { $transient->response[$pluginFile]->icons   = $icons; }
+				if (!empty($banners) && empty($transient->response[$pluginFile]->banners)) { $transient->response[$pluginFile]->banners = $banners; }
+			}
+			return $transient;
+		});
 	}
 }
 

@@ -1,13 +1,54 @@
 <?php
 /**
- * Critical Event Logger — .htaccess Blocked IPs viewer/remover + Dry-run + Normalize
- * Сумісність: Apache 2.2 (Deny from …) і 2.4 (Require not ip …)
+ * Critical Event Logger — helper module
+ * Copyright © 2025 Казмірчук Андрій
+ * License: GPLv2 or later
+ * License URI: https://www.gnu.org/licenses/gpl-2.0.html
  */
 if (!defined('ABSPATH')) exit;
 
 /** =========================
  *  Helpers (із ґардами)
  *  ========================= */
+/** Перелік резервних копій .htaccess (новіші — першими) */
+if (!function_exists('crit_ht_list_backups')) {
+	function crit_ht_list_backups(string $path): array {
+		$dir = dirname($path);
+		$bn  = basename($path); // очікуємо ".htaccess"
+		$glob = glob($dir . '/' . $bn . '.bak-*') ?: [];
+		$out = [];
+		foreach ($glob as $f) {
+			$base = basename($f);
+			$ts = null;
+			if (preg_match('/\.bak-(\d{8}-\d{6})$/', $base, $m)) {
+				$dt = \DateTime::createFromFormat('Ymd-His', $m[1]);
+				if ($dt) $ts = $dt->getTimestamp();
+			}
+			if ($ts === null) $ts = @filemtime($f) ?: 0;
+			$out[] = [
+				'basename' => $base,
+				'path'     => $f,
+				'ts'       => $ts,
+				'date'     => gmdate('Y-m-d H:i:s', $ts),
+				'size'     => @filesize($f) ?: 0,
+			];
+		}
+		usort($out, static function($a,$b){ return $b['ts'] <=> $a['ts']; });
+		return $out;
+	}
+}
+
+/** Тримати не більше $keep резервних копій (видалити старші) */
+if (!function_exists('crit_ht_rotate_backups')) {
+	function crit_ht_rotate_backups(string $path, int $keep = 3): void {
+		$list = crit_ht_list_backups($path);
+		if (count($list) <= $keep) return;
+		$to_delete = array_slice($list, $keep); // усе після перших $keep
+		foreach ($to_delete as $bk) {
+			@unlink($bk['path']); // best-effort
+		}
+	}
+}
 
 /** Шлях до .htaccess */
 if (!function_exists('crit_ht_get_path')) {
@@ -154,14 +195,22 @@ if (!function_exists('crit_ht_remove_token_from_content')) {
 	}
 }
 
-/** Створити резервну копію .htaccess із timestamp-суфіксом */
+/** Створити резервну копію .htaccess із timestamp-суфіксом (+ротація до 3 шт.) */
 if (!function_exists('crit_ht_backup_file')) {
 	function crit_ht_backup_file(string $path): bool {
 		$dir = dirname($path); $bn = basename($path);
-		$bak = $dir . '/' . $bn . '.bak-' . date('Ymd-His');
-		return @copy($path, $bak) !== false;
+		$bak = $dir . '/' . $bn . '.bak-' . gmdate('Ymd-His');
+		$ok  = @copy($path, $bak) !== false;
+		if ($ok) {
+			// Після успішного бекапу — підріжемо зайві
+			if (function_exists('crit_ht_rotate_backups')) {
+				crit_ht_rotate_backups($path, 3);
+			}
+		}
+		return $ok;
 	}
 }
+
 
 /**
  * Видалити токен у файлі (із резервною копією)
@@ -442,6 +491,36 @@ function crit_ht_blocklist_admin_page_v2() {
 			}
 		}
 	}
+		/* 1c) Відновлення з резервної копії */
+	if (isset($_POST['crit_ht_restore']) && isset($_POST['backup'])) {
+		check_admin_referer('crit_ht_restore');
+		$bn = basename((string) wp_unslash($_POST['backup'])); // лише basename
+		// дозволяємо тільки наш шаблон .htaccess.bak-YYYYmmdd-HHMMSS
+		if (!preg_match('/^\.htaccess\.bak-\d{8}-\d{6}$/', $bn)) {
+			$notice = '<div class="notice notice-error"><p>❌ Невалідна резервна копія.</p></div>';
+		} else {
+			$dir = dirname($path);
+			$full = $dir . '/' . $bn;
+			if (!file_exists($full) || !is_readable($full)) {
+				$notice = '<div class="notice notice-error"><p>❌ Обрана копія недоступна.</p></div>';
+			} elseif (!is_writable($path)) {
+				$notice = '<div class="notice notice-error"><p>❌ Файл .htaccess недоступний для запису.</p></div>';
+			} else {
+				// зробимо бекап поточного стану перед відновленням
+				crit_ht_backup_file($path);
+				$data = @file_get_contents($full);
+				if ($data === false) {
+					$notice = '<div class="notice notice-error"><p>❌ Не вдалося прочитати резервну копію.</p></div>';
+				} elseif (@file_put_contents($path, $data, LOCK_EX) === false) {
+					$notice = '<div class="notice notice-error"><p>❌ Не вдалося записати .htaccess.</p></div>';
+				} else {
+					// після відновлення теж збережемо ≤3 бекапи
+					crit_ht_rotate_backups($path, 3);
+					$notice = '<div class="notice notice-success"><p>✅ Відновлено з <code>'.esc_html($bn).'</code>.</p></div>';
+				}
+			}
+		}
+	}
 
 	/* 2) Dry-run попередній перегляд видалення */
 	$preview_token = '';
@@ -530,6 +609,27 @@ function crit_ht_blocklist_admin_page_v2() {
 		.crit-diff .crit-tok-del{color:#b91c1c;background:#fee2e2;padding:0 2px;border-radius:3px}
 	</style>';
 
+		// === Резервні копії .htaccess ===
+	$backups = crit_ht_list_backups($path);
+	echo '<div class="card" style="padding:12px;margin-top:16px">';
+	echo '<h2 style="margin:0 0 8px;">🗂 Резервні копії .htaccess</h2>';
+	echo '<p style="color:#667085;margin:6px 0 10px">Система зберігає до <strong>3</strong> останніх копій і автоматично видаляє старші.</p>';
+
+	if (empty($backups)) {
+		echo '<div class="notice notice-info"><p>Копій ще немає.</p></div>';
+	} else {
+		echo '<form method="post" class="crit-actions" onsubmit="return confirm(\'Відновити .htaccess з обраної копії?\')">';
+		wp_nonce_field('crit_ht_restore');
+		echo '<select name="backup" class="crit-inline-select" style="min-width:320px">';
+		foreach ($backups as $bk) {
+			$label = sprintf('%s (UTC) — %0.1f KB', $bk['date'], max(0.1, $bk['size']/1024));
+			echo '<option value="'.esc_attr($bk['basename']).'">'.esc_html($label).'</option>';
+		}
+		echo '</select> ';
+		echo '<button type="submit" name="crit_ht_restore" class="button button-primary">↩︎ Відновити</button>';
+		echo '</form>';
+	}
+	echo '</div>';
 	// [NORMALIZE] Панель керування нормалізацією
 	$preview_norm_url = esc_url(add_query_arg(['crit_preview_normalize' => 1]));
 	echo '<div class="card" style="padding:12px;margin:12px 0;">
@@ -550,7 +650,7 @@ function crit_ht_blocklist_admin_page_v2() {
 	}
 
 	echo   '</div>';
-
+	
 	if ($norm_diff_html !== '') {
 		echo '<div style="margin-top:10px">'.$norm_stats_html.$norm_diff_html.'</div>';
 	}
@@ -669,7 +769,7 @@ foreach ($list as $tok => $info) {
 	if (!is_writable($path)) {
 		echo '<div class="notice notice-warning" style="margin-top:10px"><p>⚠️ Файл <code>'.esc_html($path).'</code> лише для читання — запис змін неможливий. Надай права на запис і онови сторінку.</p></div>';
 	}
-
+	
 	echo '</div>';
 }
 

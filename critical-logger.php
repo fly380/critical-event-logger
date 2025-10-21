@@ -3,13 +3,13 @@
  * Plugin Name: Critical Event Logger
  * Plugin URI: https://github.com/fly380/critical-event-logger
  * Description: Логування критичних подій із швидким AJAX-переглядом, парсером «склеєних» рядків, частотністю IP, Geo/пул-визначенням, ручним блокуванням (.htaccess для Apache 2.2/2.4), ротацією й очищенням логів, GeoBlock та опційними AI-інсайтами.
- * Version: 2.1
+ * Version: 2.1.1
  * Author: Казмірчук Андрій
  * Author URI: https://www.facebook.com/fly380/
  * Text Domain: fly380
  * Requires PHP: 7.2
  * Requires at least: 5.8
- * Tested up to: 6.6 - 6.8
+ * Tested up to: 6.8
  * License: GPLv2 or later
  * Plugin URI: https://github.com/fly380/critical-event-logger
  * Update URI: https://github.com/fly380/critical-event-logger
@@ -42,8 +42,16 @@ if ( is_admin() ) {
 	}
 }
 
-ob_start();
 defined('ABSPATH') || exit;
+if (!defined('CRIT_IP_EXPAND_MAX')) {
+	define('CRIT_IP_EXPAND_MAX', 65536); // ~ /16 — досить щедро
+}
+if (!function_exists('crit_log_internal')) {
+	function crit_log_internal($msg) {
+		// Лише для внутрішніх (не користувацьких) помилок плагіна
+		error_log('[CriticalLogger] ' . $msg);
+	}
+}
 
 /* Підключаємо основні файли плагіна */
 require_once plugin_dir_path(__FILE__) . 'logger.php';
@@ -65,23 +73,38 @@ function crit_split_log_entries(string $raw): array {
  */
 function crit_tail_entries(string $file, int $limit = 300): array {
 	if (!file_exists($file) || $limit <= 0) return [];
-	$fp = @fopen($file, 'rb');
-	if (!$fp) return [];
 
-	$filesize = @filesize($file);
-	if ($filesize === false || $filesize <= 0) { // ← файл порожній
+	$fp = fopen($file, 'rb');
+	if ($fp === false) {
+		crit_log_internal("Unable to fopen for reading: {$file}");
+		return [];
+	}
+
+	$filesize = filesize($file);
+	if ($filesize === false || $filesize <= 0) {
 		fclose($fp);
 		return [];
 	}
 
-	$read = min($filesize, 1024 * 1024); // до 1 МБ
-	// fseek на 0 з кінця еквівалентно позиції в кінці — але тут read > 0 гарантовано
+	// читаємо не більше 1 МБ з хвоста
+	$read = min($filesize, 1024 * 1024);
+
 	if ($read > 0) {
-		fseek($fp, -$read, SEEK_END);
-		$chunk = fread($fp, $read) ?: '';
+		// перейти на $read байтів від кінця
+		if (fseek($fp, -$read, SEEK_END) !== 0) {
+			// якщо з якоїсь причини не вдалося — fallback на початок
+			fseek($fp, 0, SEEK_SET);
+			$read = $filesize;
+		}
+		$chunk = fread($fp, $read);
+		if ($chunk === false) {
+			crit_log_internal("fread failed on {$file}");
+			$chunk = '';
+		}
 	} else {
 		$chunk = '';
 	}
+
 	fclose($fp);
 
 	if ($chunk === '') return [];
@@ -106,7 +129,11 @@ function crit_append_log_line(string $file, string $line): void {
 		}
 	}
 	$prefix = $need_nl ? "\n" : '';
-	@file_put_contents($file, $prefix . $line . "\n", FILE_APPEND | LOCK_EX);
+	$result = file_put_contents($file, $prefix . $line . "\n", FILE_APPEND | LOCK_EX);
+	if ($result === false) {
+	crit_log_internal("file_put_contents failed (append) for {$file}");
+}
+
 }
 
 /**
@@ -168,6 +195,20 @@ add_action('admin_menu', function() {
 		25
 	);
 });
+// === AJAX: загальна кількість записів у логу ===
+add_action('wp_ajax_critical_logger_total_count', 'critical_logger_total_count_cb');
+function critical_logger_total_count_cb() {
+	if ( ! current_user_can('manage_options') ) {
+		wp_send_json_error('Недостатньо прав', 403);
+	}
+	check_ajax_referer('critical_logger_simple_nonce', 'nonce');
+
+	$log_file = plugin_dir_path(__FILE__) . 'logs/events.log';
+	$count = file_exists($log_file) ? crit_count_entries_in_file($log_file) : 0;
+
+	wp_send_json_success(['count' => (int)$count]);
+}
+
 /* === AJAX: Виявлені IP (за частотою) === */
 add_action('wp_ajax_critical_logger_detected_ips', 'critical_logger_detected_ips_cb');
 function critical_logger_detected_ips_cb() {
@@ -241,32 +282,74 @@ function critical_logger_log_table_cb() {
 	$log_file = plugin_dir_path(__FILE__) . 'logs/events.log';
 	if ( ! file_exists($log_file) ) wp_send_json_error('Лог-файл не знайдено', 404);
 
-	// скільки рядків показувати (можеш підкрутити через $_POST['limit'])
-	$limit = isset($_POST['limit']) ? max(50, min(2000, intval($_POST['limit']))) : 500;
+	$limit  = isset($_POST['limit']) ? max(50, min(2000, intval($_POST['limit']))) : 500;
+
+	// Приймаємо список дозволених рівнів (масив), спец-значення "__OTHER__" означає "всі інші"
+	$levels = isset($_POST['levels']) ? (array) $_POST['levels'] : [];
+	$levels = array_slice(array_map('sanitize_text_field', $levels), 0, 50);
+	$levels = array_values(array_filter($levels, static function($v){ return $v !== ''; }));
+
+	// Популярні рівні (щоб відрізнити "Інше")
+	$known_levels = [
+	'INFO','WARNING','WARN','ERROR','NOTICE','FATAL','DEPRECATED',
+	'USER NOTICE','USER ERROR',
+	'CORE ERROR','CORE WARNING',
+	'COMPILE ERROR','COMPILE WARNING',
+	'PARSE ERROR','STRICT','RECOVERABLE ERROR'
+	];
+	$known_map = array_flip($known_levels);
+
+	$want_other = in_array('__OTHER__', $levels, true);
+
+	// Будуємо карту дозволених і враховуємо синоніми (WARNING ⇄ WARN)
+	$allow_map = array_flip(array_diff($levels, ['__OTHER__']));
+	if (isset($allow_map['WARN']) && !isset($allow_map['WARNING'])) $allow_map['WARNING'] = true;
+	if (isset($allow_map['WARNING']) && !isset($allow_map['WARN'])) $allow_map['WARN'] = true;
+
 
 	$lines = crit_tail_entries($log_file, $limit);
-	// підрахунок частоти IP (для підсвічування)
-	$ip_counts = array();
-	foreach ($lines as $ln) {
-		if (preg_match('/\b(?:\d{1,3}\.){3}\d{1,3}\b/', $ln, $m)) {
-			$ip_counts[$m[0]] = ($ip_counts[$m[0]] ?? 0) + 1;
-		}
-	}
 
 	ob_start();
 	echo '<table class="widefat fixed striped" style="width:100%;">';
 	echo '<thead><tr><th>Час</th><th>IP</th><th>Користувач</th><th>Рівень</th><th>Повідомлення</th><th>Дія</th></tr></thead><tbody>';
 
+	$ip_counts = []; // для підсвічування частих IP
+	foreach ($lines as $ln) {
+		if (preg_match('/\b(?:\d{1,3}\.){3}\d{1,3}\b/', $ln, $m_ip)) {
+			$ip_counts[$m_ip[0]] = ($ip_counts[$m_ip[0]] ?? 0) + 1;
+		}
+	}
+
 	// показуємо від нових до старих
 	foreach (array_reverse($lines) as $line) {
 		$time = $ip = $username = $level = $message = '';
+
 		if (preg_match('/^\[([0-9\- :]+)\]\[([^\]]+)\]\[([^\]]*)\]\[([^\]]+)\]\s?(.*)$/', $line, $m)) {
-			[$time, $ip, $username, $level, $message] = array_slice($m, 1);
+			$time	 = $m[1];
+			$ip	   = $m[2];
+			$username = $m[3];
+			$level	= strtoupper(trim($m[4]));
+			$message  = $m[5];
 		} elseif (preg_match('/\b(?:\d{1,3}\.){3}\d{1,3}\b/', $line, $mm)) {
-			$ip = $mm[0]; $message = $line;
+			$ip	  = $mm[0];
+			$message = $line;
+			$level   = 'INFO'; // якщо формат не впізнано — вважаємо INFO
 		} else {
 			$message = $line;
+			$level   = 'INFO';
 		}
+
+		// ===== ФІЛЬТР РІВНІВ =====
+		if (!empty($levels)) {
+			$level_is_known = isset($known_map[$level]);
+			$level_allowed  = isset($allow_map[$level]) || (!$level_is_known && $want_other);
+
+			if (!$level_allowed) {
+				// якщо конкретні рівні вибрані, але цей не дозволено — пропускаємо
+				continue;
+			}
+		}
+		// ==========================
 
 		$style = (! empty($ip) && ($ip_counts[$ip] ?? 0) > 10) ? 'color:#c00;font-weight:bold;' : '';
 
@@ -274,12 +357,11 @@ function critical_logger_log_table_cb() {
 		echo '<td style="font-family:monospace;">' . esc_html($time) . '</td>';
 		echo '<td style="' . esc_attr($style) . '">' . esc_html($ip) . '</td>';
 		echo '<td>' . esc_html($username) . '</td>';
-		echo '<td>' . esc_html($level) . '</td>';
+		echo '<td><strong>' . esc_html($level) . '</strong></td>';
 		echo '<td style="font-family:monospace; white-space:pre-wrap;">' . esc_html($message) . '</td>';
 		echo '<td>';
 
 		if ($ip) {
-			// форма блокування прямо з AJAX-відповіді
 			echo '<form method="post" style="display:inline;">' .
 				 wp_nonce_field('manual_block_ip_action', 'manual_block_ip_nonce', true, false) .
 				 '<input type="hidden" name="manual_ip_address" value="' . esc_attr($ip) . '">' .
@@ -296,7 +378,6 @@ function critical_logger_log_table_cb() {
 	$html = ob_get_clean();
 	wp_send_json_success(['html' => $html]);
 }
-
 
 /* AJAX: оновити textarea з логами (старий handler — зберіг) */
 add_action('wp_ajax_critical_logger_reload_logs', 'critical_logger_reload_logs_callback');
@@ -319,6 +400,10 @@ function critical_logger_geo_batch_cb() {
 	check_ajax_referer('critical_logger_simple_nonce', 'nonce');
 
 	$ips = isset($_POST['ips']) ? (array) $_POST['ips'] : [];
+	$ips = array_values(array_unique(array_map('sanitize_text_field', $ips)));
+	$ips = array_filter($ips, static function($v){ return filter_var($v, FILTER_VALIDATE_IP); });
+	$ips = array_slice($ips, 0, 100); // кап на 100
+
 	$out = [];
 
 	foreach ($ips as $ip) {
@@ -338,11 +423,11 @@ function critical_logger_geo_batch_cb() {
 			$geo_country = $cached_geo['country'] ?? '';
 			$geo_city	= $cached_geo['city'] ?? '';
 		} else {
-			$resp = wp_remote_get("http://ip-api.com/json/{$ip}?fields=status,country,city", ['timeout' => 3]);
+			$resp = wp_remote_get("https://ipapi.co/{$ip}/json/", ['timeout' => 3]);
 			if (!is_wp_error($resp)) {
 				$data = json_decode(wp_remote_retrieve_body($resp), true);
-				if (!empty($data['status']) && $data['status'] === 'success') {
-					$geo_country = $data['country'] ?? '';
+				if (is_array($data)) {
+					$geo_country = $data['country_name'] ?? '';
 					$geo_city	= $data['city'] ?? '';
 					set_transient($cache_key, ['country' => $geo_country, 'city' => $geo_city], 12 * HOUR_IN_SECONDS);
 				}
@@ -363,11 +448,6 @@ function critical_logger_geo_batch_cb() {
 add_action('admin_enqueue_scripts', function($hook) {
 	if ($hook !== 'toplevel_page_critical-event-logs') return;
 	wp_enqueue_style('crit-logger-admin-css', plugin_dir_url(__FILE__) . 'css/critical-logger-admin.css', array(), '1.0');
-	wp_enqueue_script('critical-logger-simple-js', plugin_dir_url(__FILE__) . 'js/critical-logger-simple.js', array('jquery'), '1.1', true);
-	wp_localize_script('critical-logger-simple-js', 'criticalLoggerSimpleData', array(
-		'ajaxUrl' => admin_url('admin-ajax.php'),
-		'nonce' => wp_create_nonce('critical_logger_simple_nonce'),
-	));
 });
 
 if (!function_exists('crit_cidr_range_from_prefix')) {
@@ -400,8 +480,13 @@ function crit_get_ip_pool_via_cymru_bgp($ip) {
 
 	if (!filter_var($ip, FILTER_VALIDATE_IP)) return '';
 
-	$fp = @fsockopen('whois.cymru.com', 43, $errno, $errstr, 6);
-	if (!$fp) return '';
+	$errno = 0; $errstr = '';
+	$fp = fsockopen('whois.cymru.com', 43, $errno, $errstr, 6);
+	if ($fp === false) {
+	crit_log_internal("fsockopen whois.cymru.com failed: {$errno} {$errstr}");
+	return '';
+}
+
 	stream_set_timeout($fp, 6);
 
 	// " -v <ip>" — verbose одна лінія: AS | IP | BGP Prefix | CC | ...
@@ -452,15 +537,36 @@ function crit_get_ip_pool_via_rdap($ip) {
 
 	for ($i = 0; $i < $max_hops; $i++) {
 		$resp = wp_remote_get($url, [
-			'timeout'      => 12,
+			'timeout'	  => 12,
 			'redirection'  => 5,
-			'headers'      => ['Accept' => 'application/rdap+json, application/json'],
+			'headers'	  => ['Accept' => 'application/rdap+json, application/json'],
 		]);
 		if (is_wp_error($resp)) break;
 		$code = wp_remote_retrieve_response_code($resp);
 		if ($code < 200 || $code >= 300) break;
 
 		$data = json_decode(wp_remote_retrieve_body($resp), true);
+		$is_v6 = (strpos($ip, ':') !== false);
+
+		// 1) Якщо це IPv6 — спробуємо cidr0_cidrs.v6prefix
+		if ($is_v6 && !empty($data['cidr0_cidrs']) && is_array($data['cidr0_cidrs'])) {
+			foreach ($data['cidr0_cidrs'] as $cid) {
+				if (!empty($cid['v6prefix']) && isset($cid['length'])) {
+					$cidr = $cid['v6prefix'] . '/' . intval($cid['length']);
+					set_transient($cache_key, $cidr, 7 * DAY_IN_SECONDS);
+					return $cidr;
+				}
+			}
+		}
+
+		// 2) Якщо маємо start/end і це IPv6 — повертаємо як є (без обчислень span)
+		$start = $data['startAddress'] ?? ($data['network']['startAddress'] ?? null);
+		$end   = $data['endAddress']   ?? ($data['network']['endAddress']   ?? null);
+		if ($is_v6 && $start && $end && strpos($start, ':') !== false) {
+			$range = $start . '-' . $end;
+			set_transient($cache_key, $range, 7 * DAY_IN_SECONDS);
+			return $range;
+		}
 		if (!is_array($data)) break;
 
 		// Збираємо кандидатні діапазони
@@ -696,20 +802,30 @@ function crit_get_ip_pool($ip) {
  */
 function crit_expand_cidr_to_ips($cidr_list) {
 	$all_ips = [];
+	$total   = 0;
 	foreach ($cidr_list as $cidr) {
+		$chunk = [];
 		if (strpos($cidr, '-') !== false) {
-			// Якщо діапазон start-end
 			list($start_ip, $end_ip) = explode('-', $cidr);
-			$all_ips = array_merge($all_ips, crit_ip_range_to_ips(trim($start_ip), trim($end_ip)));
+			$chunk = crit_ip_range_to_ips(trim($start_ip), trim($end_ip));
 		} elseif (strpos($cidr, '/') !== false) {
-			// Якщо CIDR
-			$all_ips = array_merge($all_ips, crit_cidr_to_ips($cidr));
+			$chunk = crit_cidr_to_ips($cidr);
 		} else {
-			$all_ips[] = $cidr;
+			$chunk = [$cidr];
 		}
+
+		$total += is_array($chunk) ? count($chunk) : 1;
+		if ($total > CRIT_IP_EXPAND_MAX) {
+			// обрубуємо: повертаємо як є, без подальшого розширення
+			$all_ips[] = is_array($chunk) ? (reset($chunk) . ' … (truncated)') : $chunk;
+			break;
+		}
+
+		$all_ips = array_merge($all_ips, $chunk);
 	}
 	return $all_ips;
 }
+
 
 /**
  * Перетворення CIDR у всі IP (обережно з великими мережами)
@@ -743,8 +859,13 @@ if (!function_exists('crit_cidr_to_ips')) {
 // Перетворення діапазону start-end у всі IP
 function crit_ip_range_to_ips($start_ip, $end_ip) {
 	$start = ip2long($start_ip);
-	$end = ip2long($end_ip);
+	$end   = ip2long($end_ip);
 	if ($start === false || $end === false || $start > $end) return [];
+	$count = ($end - $start + 1);
+	if ($count > CRIT_IP_EXPAND_MAX) {
+		// занадто велика множина — повертаємо як діапазон без розгортання
+		return [ long2ip($start) . '-' . long2ip($end) ];
+	}
 	$ips = [];
 	for ($i = $start; $i <= $end; $i++) {
 		$ips[] = long2ip($i);
@@ -761,18 +882,42 @@ function crit_get_ip_pool_via_whois($ip) {
 	$cached = get_transient($cache_key);
 	if ($cached !== false) return $cached;
 
-	$cmd = "whois " . escapeshellarg($ip);
-	$output = @shell_exec($cmd);
-	if (!$output) return '';
+	if (!defined('CRIT_ALLOW_SHELL_WHOIS') || !CRIT_ALLOW_SHELL_WHOIS) {
+		return '';
+	}
 
-	// шукаємо inetnum або NetRange
+	// Базові перевірки середовища
+	if (!function_exists('shell_exec')) {
+		return '';
+	}
+	$disabled = ini_get('disable_functions');
+	if ($disabled && stripos($disabled, 'shell_exec') !== false) {
+		return '';
+	}
+
+	// Додаткові обмеження/allowlist
+	$bin = defined('CRIT_WHOIS_BIN') && CRIT_WHOIS_BIN ? CRIT_WHOIS_BIN : 'whois';
+	if (!filter_var($ip, FILTER_VALIDATE_IP)) {
+		return '';
+	}
+
+	$cmd = $bin . ' ' . escapeshellarg($ip) . ' 2>&1';
+	$output = shell_exec($cmd);
+	if (!is_string($output) || $output === '') {
+		return '';
+	}
+
+	// Захист від «нескінченності»: обрізаємо до ~200KB
+	if (strlen($output) > 200000) {
+		$output = substr($output, 0, 200000);
+	}
+
 	if (preg_match('/(?:inetnum|NetRange):\s*([0-9\.]+)\s*-\s*([0-9\.]+)/i', $output, $m)) {
 		$cidrs = crit_ip_range_to_cidrs($m[1], $m[2]);
 		$res = implode(' ', $cidrs);
 		if ($res) set_transient($cache_key, $res, 7 * DAY_IN_SECONDS);
 		return $res;
 	}
-
 	return '';
 }
 
@@ -781,7 +926,12 @@ function critical_logger_cleanup_old_logs($days = 30) {
 	$log_file = plugin_dir_path(__FILE__) . 'logs/events.log';
 	if (! file_exists($log_file)) return;
 
-	$raw = @file_get_contents($log_file) ?: '';
+	$raw = file_get_contents($log_file);
+	if ($raw === false) {
+	crit_log_internal("file_get_contents failed for {$log_file}");
+	$raw = '';
+}
+
 	$entries = crit_split_log_entries($raw);
 	if (!$entries) return;
 
@@ -863,6 +1013,82 @@ function critical_logger_admin_page() {
 	ob_start();
 
 	$log_file = plugin_dir_path(__FILE__) . 'logs/events.log';
+	// --- Очистити кеш пул/гео ---
+if (
+	isset($_POST['clear_ipcache']) &&
+	current_user_can('manage_options') &&
+	check_admin_referer('critical_logger_clear_ipcache_action', 'critical_logger_clear_ipcache_nonce')
+) {
+	global $wpdb;
+
+	// Патерни наших кеш-ключів (звичайні transients)
+	$like_patterns = array(
+		'crit_geo_%',
+		'crit_pool_%',
+		'crit_pool_bgp_%',
+		'crit_pool_rdap_v2_%',
+		'crit_pool_ripe_precise_v2_%',
+		'crit_pool_ripewhois_%'
+	);
+
+	foreach ($like_patterns as $pat) {
+		// видаляємо transient-и (НЕ site_transient)
+		$rows = $wpdb->get_col(
+			$wpdb->prepare(
+				"SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE %s",
+				'_transient_' . $pat
+			)
+		);
+		foreach ($rows as $opt_name) {
+			$key = substr($opt_name, strlen('_transient_'));
+			delete_transient($key);
+		}
+		// видаляємо timeouts
+		$rows = $wpdb->get_col(
+			$wpdb->prepare(
+				"SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE %s",
+				'_transient_timeout_' . $pat
+			)
+		);
+		foreach ($rows as $opt_name) {
+			delete_option($opt_name);
+		}
+	}
+
+	// (опційно) multisite: чистимо site_transient*
+	if (is_multisite()) {
+		$sitemeta = $wpdb->sitemeta;
+		$site_id  = get_current_network_id();
+
+		foreach ($like_patterns as $pat) {
+			// ключі site_transient
+			$meta_keys = $wpdb->get_col(
+				$wpdb->prepare(
+					"SELECT meta_key FROM {$sitemeta} WHERE site_id=%d AND meta_key LIKE %s",
+					$site_id,
+					'_site_transient_' . $pat
+				)
+			);
+			foreach ($meta_keys as $mk) {
+				$key = substr($mk, strlen('_site_transient_'));
+				delete_site_transient($key);
+			}
+			// таймаути
+			$meta_keys = $wpdb->get_col(
+				$wpdb->prepare(
+					"SELECT meta_key FROM {$sitemeta} WHERE site_id=%d AND meta_key LIKE %s",
+					$site_id,
+					'_site_transient_timeout_' . $pat
+				)
+			);
+			foreach ($meta_keys as $mk) {
+				delete_site_option($mk);
+			}
+		}
+	}
+
+	echo '<div class="notice notice-success"><p>Кеш пулу/гео очищено.</p></div>';
+}
 
 	// --- Обробка: Очистити лог ---
 	if (isset($_POST['clear_logs']) && current_user_can('manage_options')) {
@@ -1075,7 +1301,7 @@ function critical_logger_admin_page() {
 
 	$total_logs = crit_count_entries_in_file($log_file);
 
-	echo '<p>Всього записів: <strong>' . esc_html($total_logs) . '</strong></p>';
+	echo '<p>Всього записів: <strong id="crit-total-count">' . esc_html($total_logs) . '</strong></p>';
 
 	// Кнопки дій
 	echo '<div style="margin-bottom:12px;">';
@@ -1087,12 +1313,26 @@ function critical_logger_admin_page() {
 		. '<input type="submit" class="button button-secondary" value="Очистити лог" onclick="return confirm(\'Очистити лог? Це незворотно.\');">'
 		. '</form>';
 	// 2) Очистити кеш пул (НОВА КНОПКА)
-echo '<form method="post" style="display:inline; margin-left:8px;">'
+	echo '<form method="post" style="display:inline; margin-left:8px;">'
 		. wp_nonce_field('critical_logger_clear_ipcache_action', 'critical_logger_clear_ipcache_nonce', true, false)
 		. '<input type="hidden" name="clear_ipcache" value="1">'
 		. '<input type="submit" class="button" value="Очистити кеш пул" onclick="return confirm(\'Очистити кеш пул?\');">'
 		. '</form>';
 	echo '</div>';
+	// --- Фільтр рівнів лога (UI) ---
+	echo '<div id="crit-level-filters" style="margin:10px 0 12px; padding:8px; border:1px solid #ddd; border-radius:6px; background:#fff;">';
+	echo '<strong>Показувати рівні:</strong> ';
+	$levels_ui = ['INFO','WARNING','ERROR','NOTICE','FATAL','DEPRECATED'];
+	foreach ($levels_ui as $lvl) {
+	echo '<label style="margin-right:10px;"><input type="checkbox" class="crit-lvl" value="' . esc_attr($lvl) . '" checked> ' . esc_html($lvl) . '</label>';
+	}
+	echo '<label style="margin-left:8px;"><input type="checkbox" class="crit-lvl" value="__OTHER__" checked> Інше</label>';
+	echo '<span style="margin-left:10px;">';
+	echo '<a href="#" id="crit-level-all">все</a> · <a href="#" id="crit-level-none">жодного</a>';
+	echo '</span>';
+	echo '<div style="color:#666; margin-top:6px; font-size:12px;">Порада: “Інше” — це рідкісні системні рівні (PARSE ERROR, STRICT, CORE WARNING тощо).</div>';
+	echo '</div>';
+
 	// --- Таблиця логів (AJAX) ---
 	echo '<div style="max-height:270px; overflow-y:auto; border:1px solid #ddd; border-radius:6px; padding:6px; background:#fff;">';
 	echo '<div id="crit-log-container" style="padding:12px; color:#666;">Завантаження лога…</div>';
@@ -1117,21 +1357,41 @@ echo '<form method="post" style="display:inline; margin-left:8px;">'
 	?>
 <script>
 (function($){
+// --- збирання вибраних рівнів з чекбоксів ---
+function critGetSelectedLevels(){
+	var arr = [];
+	jQuery('input.crit-lvl:checked').each(function(){
+		arr.push(this.value);
+	});
+	return arr;
+}
+// 0) ЛІЧИЛЬНИК — повертаємо jqXHR
+window.critFetchTotalCount = function(){
+	return jQuery.post(ajaxurl, {
+		action: 'critical_logger_total_count',
+		nonce: '<?php echo wp_create_nonce("critical_logger_simple_nonce"); ?>'
+	}).done(function(resp){
+		if (resp && resp.success && resp.data && typeof resp.data.count !== 'undefined') {
+			jQuery('#crit-total-count').text(resp.data.count);
+		}
+	});
+};
 
 // 1) ЛОГ — повертаємо jqXHR
 window.critFetchLogTable = function(limit){
 	return $.post(ajaxurl, {
-	action: 'critical_logger_log_table',
-	nonce: '<?php echo wp_create_nonce("critical_logger_simple_nonce"); ?>',
-	limit: limit || 500
+		action: 'critical_logger_log_table',
+		nonce: '<?php echo wp_create_nonce("critical_logger_simple_nonce"); ?>',
+		limit: limit || 500,
+		levels: critGetSelectedLevels() // ← ПЕРЕДАЄМО фільтри
 	}).done(function(resp){
-	if (resp && resp.success && resp.data && resp.data.html){
-		$('#crit-log-container').html(resp.data.html);
-	} else {
-		$('#crit-log-container').html('<div style="padding:12px; color:#c00;">Не вдалося завантажити лог.</div>');
-	}
+		if (resp && resp.success && resp.data && resp.data.html){
+			$('#crit-log-container').html(resp.data.html);
+		} else {
+			$('#crit-log-container').html('<div style="padding:12px; color:#c00;">Не вдалося завантажити лог.</div>');
+		}
 	}).fail(function(){
-	$('#crit-log-container').html('<div style="padding:12px; color:#c00;">Помилка AJAX-запиту при завантаженні лога.</div>');
+		$('#crit-log-container').html('<div style="padding:12px; color:#c00;">Помилка AJAX-запиту при завантаженні лога.</div>');
 	});
 };
 
@@ -1157,9 +1417,10 @@ window.critFetchDetectedIPs = function(){
 window.critFetchGeoBatch = function(){
 var ips = [];
 $('td.crit-geo[data-ip], td.crit-pool[data-ip]').each(function(){
-var ip = $(this).data('ip');
-if (ip && ips.indexOf(ip) === -1) ips.push(ip);
+  var ip = $(this).data('ip');
+  if (ip && ips.indexOf(ip) === -1) ips.push(ip);
 });
+ips = ips.slice(0, 100);
 if (!ips.length){
 return $.Deferred().resolve().promise();
 }
@@ -1195,11 +1456,13 @@ if (resp && resp.success && resp.data) {
 
 // 5) Оновити все (чекаємо всі проміси; гео/пул викликається зсередини critFetchDetectedIPs)
 function refreshAll(){
-	return $.when(
+	return jQuery.when(
 		window.critFetchLogTable(500),
-		window.critFetchDetectedIPs()
+		window.critFetchDetectedIPs(),
+		window.critFetchTotalCount() // ← додали
 	);
 }
+
 
 // 6) Один-єдиний хендлер на кнопку
 $('#crit-reload-logs').off('click').on('click', function(e){
@@ -1214,6 +1477,24 @@ $('#crit-reload-logs').off('click').on('click', function(e){
 $(function(){
 	refreshAll();
 });
+// Переключення чекбоксів → миттєве перезавантаження таблиці лога
+$(document).on('change', 'input.crit-lvl', function(){
+	window.critFetchLogTable(500);
+	window.critFetchTotalCount();
+});
+
+// Лінки "все/жодного"
+$('#crit-level-all').on('click', function(e){
+	e.preventDefault();
+	$('input.crit-lvl').prop('checked', true);
+	window.critFetchLogTable(500);
+});
+$('#crit-level-none').on('click', function(e){
+	e.preventDefault();
+	$('input.crit-lvl').prop('checked', false);
+	// якщо все знято — покажемо порожньо; або ввімкнути INFO за замовч.
+	window.critFetchLogTable(500);
+});
 
 })(jQuery);
 </script>
@@ -1222,6 +1503,12 @@ $(function(){
 
 	if (ob_get_level()) ob_end_flush();
 }
+// При деактивації — прибираємо крон завдання ротації
+register_deactivation_hook(__FILE__, function(){
+	wp_clear_scheduled_hook('crit_daily_log_rotation');
+});
+
+
 // Підключення intel аналізу
 if (file_exists(plugin_dir_path(__FILE__) . 'intel-admin.php')) {
 	require_once plugin_dir_path(__FILE__) . 'intel-admin.php';

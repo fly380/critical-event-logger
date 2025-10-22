@@ -141,7 +141,7 @@ function crit_ai_topN(array $counts, int $n = 10): array {
 
 /** Зчитує лог-файл та готує аналітику (tail + кеш 60с, таймзона WP) */
 function crit_ai_generate_insights($limit = 300) {
-	$log_file = plugin_dir_path(__FILE__) . 'logs/events.log';
+	$log_file = crit_log_file();
 	if (!file_exists($log_file)) {
 		return [
 			'risk' => ['code'=>'unknown','label'=>'⚠️ Логів не знайдено','reasons'=>['Файл logs/events.log відсутній або порожній.']],
@@ -323,7 +323,7 @@ function crit_ai_analyze_logs_with_openai($lines) {
 	$endpoint = 'https://api.openai.com/v1/chat/completions';
 	$headers  = ['Authorization'=>'Bearer '.$apiKey,'Content-Type'=>'application/json','Accept'=>'application/json'];
 
-	$debug_log = plugin_dir_path(__FILE__) . 'logs/ai-debug.log';
+	$debug_log = crit_logs_dir() . 'ai-debug.log';
 	$log = function($msg) use ($debug_log){ @file_put_contents($debug_log, '['.date('Y-m-d H:i:s').'] '.$msg."\n", FILE_APPEND); };
 
 	$resp1 = crit_http_post_wp_curl_hard($endpoint, $payload, $headers, 45);

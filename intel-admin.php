@@ -17,7 +17,7 @@ add_action('wp_ajax_critical_logger_intel_table', function () {
 	if (!current_user_can('manage_options')) wp_send_json_error('Недостатньо прав', 403);
 	check_ajax_referer('critical_logger_simple_nonce', 'nonce');
 
-	$log_file = plugin_dir_path(__FILE__) . 'logs/events.log';
+	$log_file = crit_log_file();
 	if (!file_exists($log_file)) wp_send_json_error('Лог-файл не знайдено', 404);
 
 	$all_lines = file($log_file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);

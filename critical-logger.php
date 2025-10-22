@@ -236,7 +236,7 @@ function critical_logger_total_count_cb() {
 	}
 	check_ajax_referer('critical_logger_simple_nonce', 'nonce');
 
-	$log_file = plugin_dir_path(__FILE__) . 'logs/events.log';
+	$log_file = crit_log_file();
 	$count = file_exists($log_file) ? crit_count_entries_in_file($log_file) : 0;
 
 	wp_send_json_success(['count' => (int)$count]);
@@ -248,7 +248,7 @@ function critical_logger_detected_ips_cb() {
 	if (! current_user_can('manage_options')) wp_send_json_error('Недостатньо прав', 403);
 	check_ajax_referer('critical_logger_simple_nonce', 'nonce');
 
-	$log_file = plugin_dir_path(__FILE__) . 'logs/events.log';
+	$log_file = crit_log_file();
 	if (! file_exists($log_file)) wp_send_json_error('Лог-файл не знайдено', 404);
 
 	// Беремо тільки останні N записів для швидкості (можеш підкрутити за необхідності)
@@ -312,7 +312,7 @@ function critical_logger_log_table_cb() {
 	if ( ! current_user_can('manage_options') ) wp_send_json_error('Недостатньо прав', 403);
 	check_ajax_referer('critical_logger_simple_nonce', 'nonce');
 
-	$log_file = plugin_dir_path(__FILE__) . 'logs/events.log';
+	$log_file = crit_log_file();
 	if ( ! file_exists($log_file) ) wp_send_json_error('Лог-файл не знайдено', 404);
 
 	$limit  = isset($_POST['limit']) ? max(50, min(2000, intval($_POST['limit']))) : 500;
@@ -418,7 +418,7 @@ function critical_logger_reload_logs_callback() {
 	if (! current_user_can('manage_options')) wp_send_json_error('Недостатньо прав', 403);
 	check_ajax_referer('critical_logger_simple_nonce', 'nonce');
 
-	$log_file = plugin_dir_path(__FILE__) . 'logs/events.log';
+	$log_file = crit_log_file();
 	if (! file_exists($log_file)) wp_send_json_error('Лог-файл не знайдено', 404);
 
 	$limit  = isset($_POST['limit']) ? max(50, min(5000, intval($_POST['limit']))) : 500;
@@ -991,7 +991,7 @@ function crit_get_ip_pool_via_whois($ip) {
 
 /* Видалення старих записів у логах */
 function critical_logger_cleanup_old_logs($days = 30) {
-	$log_file = plugin_dir_path(__FILE__) . 'logs/events.log';
+	$log_file = crit_log_file();
 	if (!file_exists($log_file)) return;
 
 	$raw = file_get_contents($log_file);
@@ -1033,7 +1033,7 @@ add_action('admin_init', function() {
 			current_user_can('manage_options') &&
 			check_admin_referer('clear_log_action', 'clear_log_nonce')
 		) {
-			$log_file = plugin_dir_path(__FILE__) . 'logs/events.log';
+			$log_file = crit_log_file();
 			file_put_contents($log_file, '', LOCK_EX);
 			wp_safe_redirect(add_query_arg('cleared', '1', menu_page_url('critical-event-logs', false)));
 			exit;
@@ -1076,7 +1076,7 @@ function crit_count_entries_in_file(string $file, int $chunkSize = 131072): int 
 function critical_logger_admin_page() {
 	ob_start();
 
-	$log_file = plugin_dir_path(__FILE__) . 'logs/events.log';
+	$log_file = crit_log_file();
 	// --- Очистити кеш пул/гео ---
 if (
 	isset($_POST['clear_ipcache']) &&
@@ -1392,7 +1392,7 @@ if (
 				<li><strong>Кнопки дій</strong>:
 					<ul>
 						<li><em>Оновити</em> — перезавантажує таблицю логів, список IP і лічильник записів.</li>
-						<li><em>Очистити лог</em> — повністю очищає файл <code>logs/events.log</code>.</li>
+						<li><em>Очистити лог</em> — повністю очищає файл <code>.../uploads/critical-event-logger/logs/events.log</code>.</li>
 						<li><em>Очистити кеш пул</em> — скидає кеш RDAP/BGP/гео (корисно, коли пул/гео змінилися у провайдера).</li>
 					</ul>
 				</li>

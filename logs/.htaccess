@@ -1,5 +1,0 @@
-# Заборонити прямий доступ до лог-файлів
-<FilesMatch "\.(log|txt)$">
-    Order allow,deny
-    Deny from all
-</FilesMatch>

@@ -94,7 +94,7 @@ add_action('init', function() {
 
 	if ($should_block) {
 		// === Логування ===
-		$log_file = plugin_dir_path(__FILE__) . 'logs/events.log';
+		$log_file = crit_log_file();
 		$entry = '[' . crit_log_time() . "][GeoBlock][$country][WARN] Заблоковано вхід з країни $country ($ip)\n";
 		@file_put_contents($log_file, $entry, FILE_APPEND | LOCK_EX);
 
@@ -183,7 +183,7 @@ echo '</div>';
 				</li>
 				<li><strong>Коди країн</strong> — ISO&nbsp;3166-1 alpha-2, через кому (напр. <code>UA, PL, US</code>). Пробіли і регістр неважливі.</li>
 				<li><strong>Визначення країни</strong> — основне джерело <code>ipwho.is</code>, резервне <code>ip-api.com</code>; кеш результату на 12 год.</li>
-				<li><strong>Логування</strong> — при блокуванні додається рядок у <code>logs/events.log</code> з тегом <code>[GeoBlock]</code> і рівнем <code>WARN</code>.</li>
+				<li><strong>Логування</strong> — при блокуванні додається рядок у <code>.../uploads/critical-event-logger/logs/events.log</code> з тегом <code>[GeoBlock]</code> і рівнем <code>WARN</code>.</li>
 				<li><strong>Відповідь</strong> — користувач отримує <code>403 Forbidden</code> із коротким повідомленням.</li>
 				<li><strong>Інфраструктура</strong> — перевіряється <code>$_SERVER['REMOTE_ADDR']</code>. Якщо сайт за CDN/проксі (Cloudflare/NGINX), переконайся, що REMOTE_ADDR — це IP клієнта, або адаптуй отримання IP у своєму хоку.</li>
 				<li><strong>Безпека</strong> — GeoBlock не змінює <code>.htaccess</code>; у разі надмірного блокування можна просто вимкнути плагін через FTP.</li>

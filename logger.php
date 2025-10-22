@@ -8,18 +8,67 @@
 defined('ABSPATH') || exit;
 
 /**
+ * NEW: Centralized logs directory in /wp-content/uploads/critical-event-logger/logs
+ * - Ensures directory exists
+ * - Auto-generates .htaccess and index.php
+ * - Migrates legacy plugin_dir/logs/events.log if present
+ */
+if (!function_exists('crit_logs_dir')) {
+	function crit_logs_dir(): string {
+		if (function_exists('wp_upload_dir')) {
+			$u = wp_upload_dir();
+			$base = trailingslashit($u['basedir']) . 'critical-event-logger/logs/';
+		} else {
+			// Fallback for early bootstrap: keep old location
+			$base = plugin_dir_path(__FILE__) . 'logs/';
+		}
+		// Ensure dir
+		if (!file_exists($base)) {
+			wp_mkdir_p($base);
+		}
+		// Generate .htaccess
+		$hta = $base . '.htaccess';
+		if (!file_exists($hta)) {
+			$hta_content = <<<HTA
+# Заборонити прямий доступ до лог-файлів
+<FilesMatch "\\.(log|txt)$">
+    Order allow,deny
+    Deny from all
+</FilesMatch>
+HTA;
+			@file_put_contents($hta, $hta_content, LOCK_EX);
+		}
+		// Generate index.php
+		$idx = $base . 'index.php';
+		if (!file_exists($idx)) {
+			@file_put_contents($idx, "<?php http_response_code(404); exit;");
+		}
+		// Migrate old events.log if exists
+		$old_dir  = plugin_dir_path(__FILE__) . 'logs/';
+		$old_file = $old_dir . 'events.log';
+		$new_file = $base . 'events.log';
+		if (@file_exists($old_file) && !@file_exists($new_file)) {
+			@rename($old_file, $new_file);
+		}
+		return $base;
+	}
+}
+if (!function_exists('crit_log_file')) {
+	function crit_log_file(): string {
+		return trailingslashit(crit_logs_dir()) . 'events.log';
+	}
+}
+
+
+/**
  * Основна функція логування повідомлень.
  *
  * @param string $message Повідомлення для запису.
  * @param string $level Рівень логування (INFO, ERROR, WARNING, тощо).
  */
 function critical_logger_log($message, $level = 'INFO') {
-	$log_dir = plugin_dir_path(__FILE__) . 'logs/';
-	$log_file = $log_dir . 'events.log';
-
-	if (!file_exists($log_dir)) {
-		mkdir($log_dir, 0755, true);
-	}
+	$log_dir = crit_logs_dir();
+	$log_file = crit_log_file();
 
 	$datetime = crit_log_time(); // локальний TZ із налаштувань WP
 	$ip = function_exists('crit_client_ip') ? crit_client_ip() : ($_SERVER['REMOTE_ADDR'] ?? 'CLI');

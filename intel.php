@@ -262,7 +262,7 @@ function crit_score_to_class($score) {
  * Підсвітка небезпечних IP у текстовому полі / логах
  */
 function crit_highlight_ips_in_log_text($text) {
-	$ips = crit_get_suspicious_ips(plugin_dir_path(__FILE__) . 'logs/events.log');
+	$ips = crit_get_suspicious_ips(crit_log_file());
 	foreach ($ips as $ip => $cnt) {
 		$intel = crit_get_ip_score($ip);
 		if ($intel['is_malicious']) {
@@ -281,7 +281,7 @@ function crit_highlight_ips_in_log_text($text) {
  */
 function crit_render_intel_block() {
 	if (!current_user_can('manage_options')) return;
-	$ips = crit_get_suspicious_ips(plugin_dir_path(__FILE__) . 'logs/events.log');
+	$ips = crit_get_suspicious_ips(crit_log_file());
 
 	echo '<div class="crit-intel-block" style="margin-top:20px;">';
 	echo '<h3>Підозрілі IP</h3>';

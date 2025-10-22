@@ -56,20 +56,8 @@
 ## Встановлення
 
 ### Через релізний ZIP
-1. Завантажте архів останнього релізу `critical-logger-vX.Y.Z.zip` зі сторінки **Releases**.
+1. Завантажте архів останнього релізу `critical-event-logger.zip` зі сторінки **Releases**.
 2. В адмінці WordPress перейдіть **Плагіни → Додати новий → Завантажити плагін**, виберіть ZIP → **Встановити** → **Активувати**.
-
-### Через Git (розробка)
-```bash
-cd wp-content/plugins
-git clone https://github.com/<ваш-обліковий-запис>/critical-event-logger.git critical-logger
-wp plugin activate critical-logger
-```
-
-> Якщо використовуєте `git archive` для релізного ZIP, додавайте префікс:
-> ```bash
-> git archive --format=zip --output "critical-logger-vX.Y.Z.zip" --prefix=critical-logger/ HEAD
-> ```
 
 ---
 

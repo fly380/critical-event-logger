@@ -21,8 +21,8 @@ function critical_logger_log($message, $level = 'INFO') {
 		mkdir($log_dir, 0755, true);
 	}
 
-	$datetime = date('Y-m-d H:i:s');
-	$ip = $_SERVER['REMOTE_ADDR'] ?? 'CLI';
+	$datetime = crit_log_time(); // локальний TZ із налаштувань WP
+	$ip = function_exists('crit_client_ip') ? crit_client_ip() : ($_SERVER['REMOTE_ADDR'] ?? 'CLI');
 
 	// Отримуємо користувача
 	if (function_exists('wp_get_current_user')) {
@@ -83,5 +83,11 @@ function critical_logger_shutdown_handler() {
 	$error = error_get_last();
 	if ($error && in_array($error['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR])) {
 		critical_logger_log("FATAL ERROR: {$error['message']} in {$error['file']} on line {$error['line']}", 'FATAL');
+	}
+}
+// Час для логів у часовому поясі сайту (WP Settings → General → Timezone)
+if (!function_exists('crit_log_time')) {
+	function crit_log_time(string $format = 'Y-m-d H:i:s'): string {
+		return function_exists('wp_date') ? wp_date($format) : date($format);
 	}
 }

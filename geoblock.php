@@ -95,7 +95,7 @@ add_action('init', function() {
 	if ($should_block) {
 		// === Логування ===
 		$log_file = plugin_dir_path(__FILE__) . 'logs/events.log';
-		$entry = '[' . date('Y-m-d H:i:s') . "][GeoBlock][$country][WARN] Заблоковано вхід з країни $country ($ip)\n";
+		$entry = '[' . crit_log_time() . "][GeoBlock][$country][WARN] Заблоковано вхід з країни $country ($ip)\n";
 		@file_put_contents($log_file, $entry, FILE_APPEND | LOCK_EX);
 
 		// === Відповідь користувачу ===

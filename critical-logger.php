@@ -133,6 +133,17 @@ function crit_tail_entries(string $file, int $limit = 300): array {
 	$entries = crit_split_log_entries($chunk);
 	return array_slice($entries, -$limit);
 }
+// Централізований час для логів (локальний TZ сайту WP)
+if (!function_exists('crit_log_time')) {
+	function crit_log_time(string $format = 'Y-m-d H:i:s'): string {
+		// WP 5.3+ — поважає таймзону з налаштувань сайту
+		if (function_exists('wp_date')) {
+			return wp_date($format);
+		}
+		// Фолбек, якщо wp_date недоступний
+		return date($format);
+	}
+}
 
 /**
  * Акуратно дописує рядок у лог: гарантує перенос перед новим записом і додає \n в кінці
@@ -981,40 +992,36 @@ function crit_get_ip_pool_via_whois($ip) {
 /* Видалення старих записів у логах */
 function critical_logger_cleanup_old_logs($days = 30) {
 	$log_file = plugin_dir_path(__FILE__) . 'logs/events.log';
-	if (! file_exists($log_file)) return;
+	if (!file_exists($log_file)) return;
 
 	$raw = file_get_contents($log_file);
-	if ($raw === false) {
-	crit_log_internal("file_get_contents failed for {$log_file}");
-	$raw = '';
-}
+	if ($raw === false) $raw = '';
 
 	$entries = crit_split_log_entries($raw);
 	if (!$entries) return;
 
 	$now = time();
 	$limit_ts = $now - ($days * DAY_IN_SECONDS);
+
+	$tz = function_exists('wp_timezone') ? wp_timezone() : new DateTimeZone('UTC');
 	$kept = [];
 
 	foreach ($entries as $ln) {
 		if (preg_match('/^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]/', $ln, $m)) {
-			$ts = strtotime($m[1]);
+			$dt = DateTimeImmutable::createFromFormat('Y-m-d H:i:s', $m[1], $tz);
+			$ts = $dt ? $dt->getTimestamp() : false;
 			if ($ts !== false && $ts >= $limit_ts) {
 				$kept[] = $ln;
 			}
 		} else {
-			// якщо не змогли розпізнати — не видаляємо
-			$kept[] = $ln;
+			$kept[] = $ln; // незрозумілий формат — не чіпаємо
 		}
 	}
 
-	// Записуємо назад з одним \n між записами і \n в кінці файлу
 	$out = implode("\n", $kept);
 	if ($out !== '') $out .= "\n";
 	@file_put_contents($log_file, $out, LOCK_EX);
 }
-
-
 /* Виконуємо очищення/експорт/очистку тільки при вході в сторінку */
 add_action('admin_init', function() {
 	if (isset($_GET['page']) && $_GET['page'] === 'critical-event-logs') {
@@ -1334,7 +1341,7 @@ if (
 				// Логування
 				if (file_exists($log_file ?? '') && ! empty($added)) {
 					foreach ($blocked_entries as $entry_ip) {
-						$entry = '[' . date('Y-m-d H:i:s') . '][System][admin][INFO] Заблоковано вручну: ' . $entry_ip;
+						$entry = '[' . crit_log_time() . '][System][admin][INFO] Заблоковано вручну: ' . $entry_ip;
 						crit_append_log_line($log_file, $entry);
 
 					}

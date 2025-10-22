@@ -188,7 +188,7 @@ wp plugin activate critical-logger
 
 ```
 Critical Event Logger — helper module
-Copyright © 2025 <Ваше ім’я>
+Copyright © 2025 Казмірчук Андрій
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 ```

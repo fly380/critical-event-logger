@@ -136,6 +136,22 @@ function crit_tail_entries(string $file, int $limit = 300): array {
 	$entries = crit_split_log_entries($chunk);
 	return array_slice($entries, -$limit);
 }
+
+// Градієнт підсвітки за частотою появи IP: 11..49 → від помаранчевого до червоного, 50+ → червоний + жирний
+if (!function_exists('crit_heat_style_from_count')) {
+	function crit_heat_style_from_count(int $cnt, int $min = 10, int $max = 50, int $boldAt = 50): string {
+		if ($cnt <= $min) return '';
+		$clamped = min($max, max($cnt, $min));
+		$t = ($clamped - $min) / ($max - $min); // 0..1
+		$h = (int) round(30 - 30 * $t);         // 30° (помаранч) → 0° (червоний)
+		$s = 85;                                 // насиченість
+		$l = (int) round(45 - 5 * $t);           // легка зміна яскравості
+		$style = "color:hsl({$h}deg, {$s}%, {$l}%);";
+		if ($cnt >= $boldAt) $style .= 'font-weight:bold;';
+		return $style;
+	}
+}
+
 // Централізований час для логів (локальний TZ сайту WP)
 if (!function_exists('crit_log_time')) {
 	function crit_log_time(string $format = 'Y-m-d H:i:s'): string {
@@ -303,10 +319,10 @@ function critical_logger_detected_ips_cb() {
 			</tr></thead><tbody>';
 
 		foreach ($ip_counts as $fip => $cnt) {
-			$color = ($cnt > 10) ? 'color:#c00;font-weight:bold;' : '';
+			$style = crit_heat_style_from_count((int)$cnt);
 
 			echo '<tr>';
-			echo '<td style="' . esc_attr($color) . '">' . esc_html($fip) . '</td>';
+			echo '<td style="' . esc_attr($style) . '">' . esc_html($fip) . '</td>';
 			echo '<td>' . intval($cnt) . '</td>';
 			echo '<td class="crit-pool" data-ip="' . esc_attr($fip) . '"><em style="color:#888">…</em></td>';
 			echo '<td class="crit-geo" data-ip="' . esc_attr($fip) . '"><em style="color:#888">…</em></td>';
@@ -422,8 +438,11 @@ function critical_logger_log_table_cb() {
 			$message_out  = $message;
 		}
 
-		$style = (! empty($ip) && ($ip_counts[$ip] ?? 0) > 10) ? 'color:#c00;font-weight:bold;' : '';
-
+		$style = '';
+		if (!empty($ip)) {
+			$style = crit_heat_style_from_count((int) ($ip_counts[$ip] ?? 0));
+		}
+		
 		echo '<tr>';
 		echo '<td style="font-family:monospace;">' . esc_html($time) . '</td>';
 		echo '<td style="' . esc_attr($style) . '">' . esc_html($ip) . '</td>';

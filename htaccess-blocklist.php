@@ -1,6 +1,6 @@
 <?php
 /**
- * Critical Event Logger — helper module
+ * Critical Event Logger — helper module (.htaccess blocklist UI + Info modal)
  * Copyright © 2025 Казмірчук Андрій
  * License: GPLv2 or later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -381,7 +381,6 @@ if (!function_exists('crit_ht_normalize_rules_in_content')) {
 }
 
 /** Рендер «тихого» diff — показуємо лише реально змінені рядки з номерами */
-// Замінити попередню версію цієї функції
 if (!function_exists('crit_ht_render_unified_diff')) {
 	function crit_ht_render_unified_diff(string $old, string $new, string $highlight_token = ''): string {
 		$eol = crit_ht_detect_eol($old);
@@ -438,7 +437,7 @@ if (!function_exists('crit_ht_render_unified_diff')) {
 }
 
 /** =========================
- *  Адмін-сторінка (v2)
+ *  Адмін-сторінка (v2) + Info-модалка
  *  ========================= */
 
 function crit_ht_blocklist_admin_page_v2() {
@@ -491,7 +490,8 @@ function crit_ht_blocklist_admin_page_v2() {
 			}
 		}
 	}
-		/* 1c) Відновлення з резервної копії */
+
+	/* 1c) Відновлення з резервної копії */
 	if (isset($_POST['crit_ht_restore']) && isset($_POST['backup'])) {
 		check_admin_referer('crit_ht_restore');
 		$bn = basename((string) wp_unslash($_POST['backup'])); // лише basename
@@ -582,7 +582,86 @@ function crit_ht_blocklist_admin_page_v2() {
 	$list = $content !== '' ? crit_ht_parse_blocked($content) : [];
 
 	/* === UI === */
-	echo '<div class="wrap"><h1>🔒 Заблоковані IP (.htaccess)</h1>';
+	echo '<div class="wrap">';
+	// Заголовок + кнопка Info
+	echo '<div class="crit-admin-header" style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px;">';
+	echo '<h1 style="margin:0;">🔒 Заблоковані IP (.htaccess)</h1>';
+	echo '<button id="crit-ht-info-open" type="button" class="button button-secondary" aria-haspopup="dialog" aria-expanded="false" aria-controls="crit-ht-info-modal">Info</button>';
+	echo '</div>';
+
+	// Модалка Info (прихована)
+	?>
+	<style id="crit-ht-info-modal-css">
+		#crit-ht-info-modal[hidden]{display:none;}
+		#crit-ht-info-modal{position:fixed;inset:0;z-index:100000;}
+		#crit-ht-info-modal .crit-modal__backdrop{position:absolute;inset:0;background:rgba(0,0,0,.35);}
+		#crit-ht-info-modal .crit-modal__dialog{
+			position:relative;max-width:880px;margin:6vh auto;background:#fff;border-radius:8px;
+			box-shadow:0 10px 30px rgba(0,0,0,.2);padding:20px 22px;outline:0;
+		}
+		#crit-ht-info-modal h2{margin:0 32px 10px 0;}
+		#crit-ht-info-modal .crit-modal__body{line-height:1.55;max-height:66vh;overflow:auto;padding-right:2px;}
+		#crit-ht-info-modal .crit-modal__close{
+			position:absolute;right:12px;top:10px;border:0;background:transparent;font-size:22px;line-height:1;cursor:pointer;
+		}
+		#crit-ht-info-modal ul{margin:0 0 10px 18px}
+		#crit-ht-info-modal li{margin:6px 0}
+		#crit-ht-info-modal code{background:#f6f7f7;border:1px solid #e2e4e7;border-radius:3px;padding:1px 4px}
+	</style>
+	<div id="crit-ht-info-modal" role="dialog" aria-modal="true" aria-labelledby="crit-ht-info-title" hidden>
+		<div class="crit-modal__backdrop" data-close="1"></div>
+		<div class="crit-modal__dialog" role="document" tabindex="-1">
+			<button type="button" class="crit-modal__close" id="crit-ht-info-close" aria-label="Закрити" title="Закрити (Esc)">×</button>
+			<h2 id="crit-ht-info-title">Про сторінку «Заблоковані IP (.htaccess)»</h2>
+			<div class="crit-modal__body">
+				<ul>
+					<li><strong>Пошук блокувань:</strong> парсяться рядки <code>Deny from …</code> (Apache 2.2) і <code>Require not ip …</code> (Apache 2.4). Інші директиви не змінюються.</li>
+					<li><strong>Dry-run:</strong> «👁 Попередній перегляд» показує <em>реальний diff</em> лише по змінених рядках, з підсвіткою видаленого токена.</li>
+					<li><strong>Scope:</strong> можна видаляти всюди (обидва типи) або точково: лише <code>Deny from</code> / лише <code>Require not ip</code>.</li>
+					<li><strong>Нормалізація:</strong> обʼєднує <em>суміжні</em> однакові правила в один рядок, прибирає дублікати, сортує токени; решта рядків/порожнеч не чіпаються.</li>
+					<li><strong>Резервні копії:</strong> перед записом створюється файл <code>.htaccess.bak-YYYYmmdd-HHMMSS</code>; зберігаються останні 3 копії (авторотація).</li>
+					<li><strong>Збереження форматування:</strong> тип переносу рядків зберігається; dry-run/нормалізація не «шумлять» у diff.</li>
+					<li><strong>Валідація токенів:</strong> приймаються IPv4/IPv6, CIDR, а також шаблони на кшталт <code>123.*</code> або <code>10.0.0.</code>.</li>
+					<li><strong>Права доступу:</strong> для змін потрібен запис у <code>.htaccess</code>; інакше доступний лише перегляд.</li>
+				</ul>
+				<p><small><span style="opacity:.8;">Esc</span> або клік поза вікном — закрити.</small></p>
+			</div>
+		</div>
+	</div>
+	<script>
+	// INFO MODAL (HT Access page)
+	(function($){
+		var $modal    = $('#crit-ht-info-modal');
+		var $dialog   = $modal.find('.crit-modal__dialog');
+		var $openBtn  = $('#crit-ht-info-open');
+		var $closeBtn = $('#crit-ht-info-close');
+		var lastFocus = null;
+
+		function openModal(){
+			lastFocus = document.activeElement;
+			$modal.removeAttr('hidden');
+			$openBtn.attr('aria-expanded','true');
+			setTimeout(function(){ $dialog.trigger('focus'); }, 0);
+		}
+		function closeModal(){
+			$modal.attr('hidden','hidden');
+			$openBtn.attr('aria-expanded','false');
+			if (lastFocus) { lastFocus.focus(); }
+		}
+
+		$openBtn.on('click', function(e){ e.preventDefault(); openModal(); });
+		$closeBtn.on('click', function(){ closeModal(); });
+		$modal.on('click', function(e){
+			if ($(e.target).is('[data-close], .crit-modal__backdrop')) { closeModal(); }
+		});
+		$(document).on('keydown', function(e){
+			if (e.key === 'Escape' && !$modal.is('[hidden]')) { e.preventDefault(); closeModal(); }
+		});
+	})(jQuery);
+	</script>
+	<?php
+
+	// Нотіси
 	if ($notice) echo $notice;
 
 	if (!file_exists($path)) {
@@ -602,21 +681,21 @@ function crit_ht_blocklist_admin_page_v2() {
 		.crit-actions form{display:inline-flex;margin:0}
 		.crit-actions .button{margin:0}
 		.crit-inline-select{height:28px}
-		.crit-actions{display:flex;gap:6px;align-items:center;flex-wrap:nowrap;white-space:nowrap}
-		.crit-actions form{display:inline-flex;margin:0}
-		.crit-actions .button{margin:0}
 		/* Підсвітка видаленого токена у diff */
 		.crit-diff .crit-tok-del{color:#b91c1c;background:#fee2e2;padding:0 2px;border-radius:3px}
+		.crit-ln{display:inline-block;min-width:48px;color:#64748b}
+		.crit-old{display:block;color:#b91c1c}
+		.crit-new{display:block;color:#065f46}
 	</style>';
 
-		// === Резервні копії .htaccess ===
+	// === Резервні копії .htaccess ===
 	$backups = crit_ht_list_backups($path);
 	echo '<div class="card" style="padding:12px;margin-top:16px">';
 	echo '<h2 style="margin:0 0 8px;">🗂 Резервні копії .htaccess</h2>';
 	echo '<p style="color:#667085;margin:6px 0 10px">Система зберігає до <strong>3</strong> останніх копій і автоматично видаляє старші.</p>';
 
 	if (empty($backups)) {
-		echo '<div class="notice notice-info"><p>Копій ще немає.</p></div>';
+		
 	} else {
 		echo '<form method="post" class="crit-actions" onsubmit="return confirm(\'Відновити .htaccess з обраної копії?\')">';
 		wp_nonce_field('crit_ht_restore');
@@ -630,6 +709,7 @@ function crit_ht_blocklist_admin_page_v2() {
 		echo '</form>';
 	}
 	echo '</div>';
+
 	// [NORMALIZE] Панель керування нормалізацією
 	$preview_norm_url = esc_url(add_query_arg(['crit_preview_normalize' => 1]));
 	echo '<div class="card" style="padding:12px;margin:12px 0;">
@@ -694,74 +774,74 @@ function crit_ht_blocklist_admin_page_v2() {
 			<th style="width:330px">Дія</th>
 		</tr></thead><tbody>';
 
-foreach ($list as $tok => $info) {
-	$types = array_unique(array_map(function($p){ return $p['type']; }, $info['places']));
-	$typeLabels = [];
-	foreach ($types as $t) {
-		$typeLabels[] = $t === 'deny' ? 'Apache 2.2 (Deny from)' : 'Apache 2.4 (Require not ip)';
+	foreach ($list as $tok => $info) {
+		$types = array_unique(array_map(function($p){ return $p['type']; }, $info['places']));
+		$typeLabels = [];
+		foreach ($types as $t) {
+			$typeLabels[] = $t === 'deny' ? 'Apache 2.2 (Deny from)' : 'Apache 2.4 (Require not ip)';
+		}
+		$foundIn = implode(' • ', $typeLabels);
+
+		$occurs_deny = in_array('deny', $types, true);
+		$occurs_req  = in_array('require_not', $types, true);
+		$has_both    = $occurs_deny && $occurs_req;
+
+		// Побудуємо HTML дій
+		$actions = '<div class="crit-actions">';
+
+		if ($has_both) {
+			// --- Є в обох типах: показуємо селект із 3 варіантами ---
+			$actions .= '
+			<form method="get">
+				<input type="hidden" name="page" value="crit-htaccess-blocks">
+				<input type="hidden" name="crit_preview_ip" value="'.esc_attr(rawurlencode($tok)).'">
+				<select name="crit_scope" class="crit-inline-select">
+					<option value="all">Усюди</option>
+					<option value="deny">Лише Deny from</option>
+					<option value="require_not">Лише Require not ip</option>
+				</select>
+				<button type="submit" class="button button-small">👁 Попередній перегляд</button>
+			</form>
+
+			<form method="post" onsubmit="return confirm(\''.esc_js("Підтвердити видалення $tok?").'\')">
+				'.wp_nonce_field('crit_ht_confirm_delete', '_wpnonce', true, false).'
+				<input type="hidden" name="token" value="'.esc_attr(rawurlencode($tok)).'">
+				<select name="scope" class="crit-inline-select">
+					<option value="all">Усюди</option>
+					<option value="deny">Лише Deny from</option>
+					<option value="require_not">Лише Require not ip</option>
+				</select>
+				<button type="submit" name="crit_ht_confirm_delete" class="button button-small button-secondary">🗑 Видалити</button>
+			</form>';
+		} else {
+			// --- Є лише в одному типі: селект зайвий, передаємо scope приховано ---
+			$single = $occurs_deny ? 'deny' : 'require_not';
+
+			$actions .= '
+			<form method="get">
+				<input type="hidden" name="page" value="crit-htaccess-blocks">
+				<input type="hidden" name="crit_preview_ip" value="'.esc_attr(rawurlencode($tok)).'">
+				<input type="hidden" name="crit_scope" value="'.$single.'">
+				<button type="submit" class="button button-small">👁 Попередній перегляд</button>
+			</form>
+
+			<form method="post" onsubmit="return confirm(\''.esc_js("Підтвердити видалення $tok?").'\')">
+				'.wp_nonce_field('crit_ht_confirm_delete', '_wpnonce', true, false).'
+				<input type="hidden" name="token" value="'.esc_attr(rawurlencode($tok)).'">
+				<input type="hidden" name="scope" value="'.$single.'">
+				<button type="submit" name="crit_ht_confirm_delete" class="button button-small button-secondary">🗑 Видалити</button>
+			</form>';
+		}
+
+		$actions .= '</div>';
+
+		echo '<tr>
+				<td><code>'.esc_html($tok).'</code></td>
+				<td style="text-align:right">'.intval($info['count']).'</td>
+				<td>'.esc_html($foundIn).'</td>
+				<td>'.$actions.'</td>
+			</tr>';
 	}
-	$foundIn = implode(' • ', $typeLabels);
-
-	$occurs_deny = in_array('deny', $types, true);
-	$occurs_req  = in_array('require_not', $types, true);
-	$has_both    = $occurs_deny && $occurs_req;
-
-	// Побудуємо HTML дій
-	$actions = '<div class="crit-actions">';
-
-	if ($has_both) {
-		// --- Є в обох типах: показуємо селект із 3 варіантами ---
-		$actions .= '
-		<form method="get">
-			<input type="hidden" name="page" value="crit-htaccess-blocks">
-			<input type="hidden" name="crit_preview_ip" value="'.esc_attr(rawurlencode($tok)).'">
-			<select name="crit_scope" class="crit-inline-select">
-				<option value="all">Усюди</option>
-				<option value="deny">Лише Deny from</option>
-				<option value="require_not">Лише Require not ip</option>
-			</select>
-			<button type="submit" class="button button-small">👁 Попередній перегляд</button>
-		</form>
-
-		<form method="post" onsubmit="return confirm(\''.esc_js("Підтвердити видалення $tok?").'\')">
-			'.wp_nonce_field('crit_ht_confirm_delete', '_wpnonce', true, false).'
-			<input type="hidden" name="token" value="'.esc_attr(rawurlencode($tok)).'">
-			<select name="scope" class="crit-inline-select">
-				<option value="all">Усюди</option>
-				<option value="deny">Лише Deny from</option>
-				<option value="require_not">Лише Require not ip</option>
-			</select>
-			<button type="submit" name="crit_ht_confirm_delete" class="button button-small button-secondary">🗑 Видалити</button>
-		</form>';
-	} else {
-		// --- Є лише в одному типі: селект зайвий, передаємо scope приховано ---
-		$single = $occurs_deny ? 'deny' : 'require_not';
-
-		$actions .= '
-		<form method="get">
-			<input type="hidden" name="page" value="crit-htaccess-blocks">
-			<input type="hidden" name="crit_preview_ip" value="'.esc_attr(rawurlencode($tok)).'">
-			<input type="hidden" name="crit_scope" value="'.$single.'">
-			<button type="submit" class="button button-small">👁 Попередній перегляд</button>
-		</form>
-
-		<form method="post" onsubmit="return confirm(\''.esc_js("Підтвердити видалення $tok?").'\')">
-			'.wp_nonce_field('crit_ht_confirm_delete', '_wpnonce', true, false).'
-			<input type="hidden" name="token" value="'.esc_attr(rawurlencode($tok)).'">
-			<input type="hidden" name="scope" value="'.$single.'">
-			<button type="submit" name="crit_ht_confirm_delete" class="button button-small button-secondary">🗑 Видалити</button>
-		</form>';
-	}
-
-	$actions .= '</div>';
-
-	echo '<tr>
-			<td><code>'.esc_html($tok).'</code></td>
-			<td style="text-align:right">'.intval($info['count']).'</td>
-			<td>'.esc_html($foundIn).'</td>
-			<td>'.$actions.'</td>
-		</tr>';
-}
 
 	echo '</tbody></table>';
 
@@ -770,7 +850,7 @@ foreach ($list as $tok => $info) {
 		echo '<div class="notice notice-warning" style="margin-top:10px"><p>⚠️ Файл <code>'.esc_html($path).'</code> лише для читання — запис змін неможливий. Надай права на запис і онови сторінку.</p></div>';
 	}
 	
-	echo '</div>';
+	echo '</div>'; // .wrap
 }
 
 /** Пункт меню — привʼязуємо нову версію рендера */

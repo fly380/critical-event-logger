@@ -313,7 +313,7 @@ function critical_logger_log_table_cb() {
 
 	// Популярні рівні (щоб відрізнити "Інше")
 	$known_levels = [
-	'INFO','WARNING','WARN','ERROR','NOTICE','FATAL','DEPRECATED',
+	'INFO','WARNING','WARN','ERROR','NOTICE','FATAL','DEPRECATED','SCAN',
 	'USER NOTICE','USER ERROR',
 	'CORE ERROR','CORE WARNING',
 	'COMPILE ERROR','COMPILE WARNING',
@@ -438,24 +438,59 @@ function critical_logger_geo_batch_cb() {
 		$pool = implode(', ', array_filter($pool_raw));
 
 		// гео (кеш транзієнтом)
-		$geo_country = ''; $geo_city = '';
-		$cache_key = 'crit_geo_' . md5($ip);
-		$cached_geo = get_transient($cache_key);
-		if ($cached_geo !== false) {
-			$geo_country = $cached_geo['country'] ?? '';
-			$geo_city	= $cached_geo['city'] ?? '';
-		} else {
-			$resp = wp_remote_get("https://ipapi.co/{$ip}/json/", ['timeout' => 3]);
-			if (!is_wp_error($resp)) {
-				$data = json_decode(wp_remote_retrieve_body($resp), true);
-				if (is_array($data)) {
-					$geo_country = $data['country_name'] ?? '';
-					$geo_city	= $data['city'] ?? '';
-					set_transient($cache_key, ['country' => $geo_country, 'city' => $geo_city], 12 * HOUR_IN_SECONDS);
-				}
-			}
-		}
-		$geo = trim(($geo_country ?: '') . ($geo_city ? ', ' . $geo_city : ''));
+		// гео (кеш транзієнтом + fallback провайдер)
+$geo_country = ''; $geo_city = '';
+$cache_key = 'crit_geo_' . md5($ip);
+$cached_geo = get_transient($cache_key);
+if ($cached_geo !== false && is_array($cached_geo)) {
+    $geo_country = $cached_geo['country'] ?? '';
+    $geo_city    = $cached_geo['city'] ?? '';
+} else {
+    $providers = [
+        [
+            'url'         => "https://ipapi.co/{$ip}/json/",
+            'country_key' => 'country_name',
+            'city_key'    => 'city',
+            'ok_check'    => null, // ipapi не має поля success
+        ],
+        [
+            'url'         => "https://ipwho.is/{$ip}",
+            'country_key' => 'country',
+            'city_key'    => 'city',
+            'ok_check'    => 'success', // ipwho.is має success=true/false
+        ],
+    ];
+
+    foreach ($providers as $p) {
+        $resp = wp_remote_get($p['url'], ['timeout' => 6]); // було 3 → стало 6
+        if (is_wp_error($resp)) { continue; }
+
+        $code = wp_remote_retrieve_response_code($resp);
+        if ($code !== 200) { continue; }
+
+        $data = json_decode(wp_remote_retrieve_body($resp), true);
+        if (!is_array($data)) { continue; }
+
+        if ($p['ok_check'] && (empty($data[$p['ok_check']]) || $data[$p['ok_check']] !== true)) {
+            continue; // ipwho.is повернув success:false
+        }
+
+        $geo_country = trim((string)($data[$p['country_key']] ?? ''));
+        $geo_city    = trim((string)($data[$p['city_key']] ?? ''));
+        break;
+    }
+
+    // Поставимо кеш в будь-якому випадку:
+    // - якщо вдалося витягти країну/місто → 24 год
+    // - якщо ні (негативний кеш) → 30 хв, щоб не молотити сервіс щохвилини
+    set_transient(
+        $cache_key,
+        ['country' => $geo_country, 'city' => $geo_city],
+        ($geo_country || $geo_city) ? DAY_IN_SECONDS : 30 * MINUTE_IN_SECONDS
+    );
+}
+$geo = trim(($geo_country ?: '') . ($geo_city ? ', ' . $geo_city : ''));
+
 
 		$out[$ip] = [
 			'pool' => $pool ?: '-',
@@ -1313,7 +1348,63 @@ if (
 
 	// --- Інтерфейс ---
 	echo '<div class="wrap">';
-	echo '<h1>Critical Event Logger</h1>';
+	echo '<div class="crit-admin-header" style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px;">';
+	echo '<h1 style="margin:0;">Critical Event Logger</h1>';
+	echo '<button id="crit-info-open" type="button" class="button button-secondary" aria-haspopup="dialog" aria-expanded="false" aria-controls="crit-info-modal">Info</button>';
+	echo '</div>';
+// === INFO MODAL ===
+?>
+<style id="crit-info-modal-css">
+	#crit-info-modal[hidden]{display:none;}
+	#crit-info-modal{position:fixed;inset:0;z-index:100000;}
+	#crit-info-modal .crit-modal__backdrop{position:absolute;inset:0;background:rgba(0,0,0,.35);}
+	#crit-info-modal .crit-modal__dialog{
+		position:relative;max-width:780px;margin:6vh auto;background:#fff;border-radius:8px;
+		box-shadow:0 10px 30px rgba(0,0,0,.2);padding:20px 22px;outline:0;
+	}
+	#crit-info-modal h2{margin:0 32px 10px 0;}
+	#crit-info-modal .crit-modal__body{line-height:1.55;max-height:65vh;overflow:auto;padding-right:2px;}
+	#crit-info-modal .crit-modal__close{
+		position:absolute;right:12px;top:10px;border:0;background:transparent;font-size:22px;line-height:1;cursor:pointer;
+	}
+	#crit-info-modal .crit-kbd{display:inline-block;border:1px solid #ddd;border-bottom-width:2px;border-radius:4px;padding:0 5px;font:12px/20px monospace;background:#f8f8f8}
+	#crit-info-modal ul{margin:0 0 10px 18px}
+	#crit-info-modal li{margin:6px 0}
+	#crit-info-modal code{background:#f6f7f7;border:1px solid #e2e4e7;border-radius:3px;padding:1px 4px}
+</style>
+<div id="crit-info-modal" role="dialog" aria-modal="true" aria-labelledby="crit-info-title" hidden>
+	<div class="crit-modal__backdrop" data-close="1"></div>
+	<div class="crit-modal__dialog" role="document" tabindex="-1">
+		<button type="button" class="crit-modal__close" id="crit-info-close" aria-label="Закрити" title="Закрити (Esc)">×</button>
+		<h2 id="crit-info-title">Що вміє Critical Event Logger</h2>
+		<div class="crit-modal__body">
+			<p><strong>Огляд функцій інтерфейсу цієї сторінки:</strong></p>
+			<ul>
+				<li><strong>Таблиця логів</strong> — AJAX-перегляд останніх записів із підсвіченням частих IP. Фільтруй за рівнями зверху блоку «Показувати рівні».</li>
+				<li><strong>Виявлені IP</strong> — зведена таблиця частоти появи IP. Для кожного IP асинхронно визначається <em>пул</em> (BGP/RDAP/RIPE) і <em>гео</em>.</li>
+				<li><strong>Кнопки дій</strong>:
+					<ul>
+						<li><em>Оновити</em> — перезавантажує таблицю логів, список IP і лічильник записів.</li>
+						<li><em>Очистити лог</em> — повністю очищає файл <code>logs/events.log</code>.</li>
+						<li><em>Очистити кеш пул</em> — скидає кеш RDAP/BGP/гео (корисно, коли пул/гео змінилися у провайдера).</li>
+					</ul>
+				</li>
+				<li><strong>Блокування</strong>:
+					<ul>
+						<li><em>Блокувати</em> поруч із записом/IP — додає правило до <code>.htaccess</code> (враховується Apache 2.2/2.4). Якщо <code>.htaccess</code> недоступний — запис у <code>blocked_ips.txt</code>.</li>
+						<li><em>Блокувати пул</em> — після визначення пулу кнопка активується й підставляє отриманий діапазон/CIDR.</li>
+						<li><em>Заблокувати IP вручну</em> — приймає одиночний IP, CIDR (напр. <code>178.128.16.0/20</code>) або діапазон <code>start - end</code>. Діапазони автоматично конвертуються у мінімальний набір CIDR.</li>
+					</ul>
+				</li>
+				<li><strong>Лічильник записів</strong> — швидкий підрахунок загальної кількості лог-записів.</li>
+				<li><strong>Ротація</strong> — під час відкриття сторінки видаляються записи старші 30 днів (див. <code>critical_logger_cleanup_old_logs()</code> та <code>rotation.php</code>).</li>
+			</ul>
+			<p><strong>Джерела даних:</strong> пул через Team&nbsp;Cymru (BGP), RDAP (офіційні RIR), RIPE; гео — <code>ipapi.co</code> / <code>ipwho.is</code> з кешуванням.</p>
+			<p><span class="crit-kbd">Esc</span> — закрити модалку. Клік поза вікном — теж закриє.</p>
+		</div>
+	</div>
+</div>
+<?php
 
 	if (! file_exists($log_file)) {
 		echo '<div class="notice notice-error"><p>Файл логів не знайдено: ' . esc_html($log_file) . '</p></div></div>';
@@ -1344,7 +1435,7 @@ if (
 	// --- Фільтр рівнів лога (UI) ---
 	echo '<div id="crit-level-filters" style="margin:10px 0 12px; padding:8px; border:1px solid #ddd; border-radius:6px; background:#fff;">';
 	echo '<strong>Показувати рівні:</strong> ';
-	$levels_ui = ['INFO','WARNING','ERROR','NOTICE','FATAL','DEPRECATED'];
+	$levels_ui = ['INFO','WARNING','ERROR','NOTICE','FATAL','DEPRECATED','SCAN'];
 	foreach ($levels_ui as $lvl) {
 	echo '<label style="margin-right:10px;"><input type="checkbox" class="crit-lvl" value="' . esc_attr($lvl) . '" checked> ' . esc_html($lvl) . '</label>';
 	}
@@ -1379,6 +1470,39 @@ if (
 	?>
 <script>
 (function($){
+// === INFO MODAL JS ===
+(function(){
+	var $modal   = jQuery('#crit-info-modal');
+	var $dialog  = $modal.find('.crit-modal__dialog');
+	var $openBtn = jQuery('#crit-info-open');
+	var $closeBtn= jQuery('#crit-info-close');
+	var lastFocus = null;
+
+	function openModal(){
+		lastFocus = document.activeElement;
+		$modal.removeAttr('hidden');
+		$openBtn.attr('aria-expanded','true');
+		// фокус у діалог
+		setTimeout(function(){ $dialog.trigger('focus'); }, 0);
+	}
+
+	function closeModal(){
+		$modal.attr('hidden','hidden');
+		$openBtn.attr('aria-expanded','false');
+		if (lastFocus) { lastFocus.focus(); }
+	}
+
+	$openBtn.on('click', function(e){ e.preventDefault(); openModal(); });
+	$closeBtn.on('click', function(){ closeModal(); });
+	$modal.on('click', function(e){
+		if (jQuery(e.target).is('[data-close], .crit-modal__backdrop')) { closeModal(); }
+	});
+	jQuery(document).on('keydown', function(e){
+		if (e.key === 'Escape' && !$modal.is('[hidden]')) { e.preventDefault(); closeModal(); }
+	});
+})();
+	
+
 // --- збирання вибраних рівнів з чекбоксів ---
 function critGetSelectedLevels(){
 	var arr = [];

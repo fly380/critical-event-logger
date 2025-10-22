@@ -1,6 +1,6 @@
 <?php
 /**
- * Critical Event Logger — helper module
+ * Critical Event Logger — helper module (API Keys page + Info modal + Secret Reporter)
  * Copyright © 2025 Казмірчук Андрій
  * License: GPLv2 or later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -136,7 +136,54 @@ function crit_keys_settings_page() {
 	};
 
 	echo '<div class="wrap">';
-	echo '<h1>🔐 Critical Logger — API Keys</h1>';
+	// === Хедер із кнопкою Info ===
+	echo '<div class="crit-admin-header" style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px;">';
+	echo '<h1 style="margin:0;">🔐 Critical Logger — API Keys</h1>';
+	echo '<button id="crit-keys-info-open" type="button" class="button button-secondary" aria-haspopup="dialog" aria-expanded="false" aria-controls="crit-keys-info-modal">Info</button>';
+	echo '</div>';
+
+	// === Модалка Info ===
+	?>
+	<style id="crit-keys-info-modal-css">
+		#crit-keys-info-modal[hidden]{display:none;}
+		#crit-keys-info-modal{position:fixed;inset:0;z-index:100000;}
+		#crit-keys-info-modal .crit-modal__backdrop{position:absolute;inset:0;background:rgba(0,0,0,.35);}
+		#crit-keys-info-modal .crit-modal__dialog{
+			position:relative;max-width:820px;margin:6vh auto;background:#fff;border-radius:8px;
+			box-shadow:0 10px 30px rgba(0,0,0,.2);padding:20px 22px;outline:0;
+		}
+		#crit-keys-info-modal h2{margin:0 32px 10px 0;}
+		#crit-keys-info-modal .crit-modal__body{line-height:1.55;max-height:65vh;overflow:auto;padding-right:2px;}
+		#crit-keys-info-modal .crit-modal__close{
+			position:absolute;right:12px;top:10px;border:0;background:transparent;font-size:22px;line-height:1;cursor:pointer;
+		}
+		#crit-keys-info-modal ul{margin:0 0 10px 18px}
+		#crit-keys-info-modal li{margin:6px 0}
+		#crit-keys-info-modal code{background:#f6f7f7;border:1px solid #e2e4e7;border-radius:3px;padding:1px 4px}
+	</style>
+	<div id="crit-keys-info-modal" role="dialog" aria-modal="true" aria-labelledby="crit-keys-info-title" hidden>
+		<div class="crit-modal__backdrop" data-close="1"></div>
+		<div class="crit-modal__dialog" role="document" tabindex="-1">
+			<button type="button" class="crit-modal__close" id="crit-keys-info-close" aria-label="Закрити" title="Закрити (Esc)">×</button>
+			<h2 id="crit-keys-info-title">Про сторінку «API Keys»</h2>
+			<div class="crit-modal__body">
+				<ul>
+					<li><strong>Джерело правди</strong> — ключі зберігаються <em>лише у БД</em>. Читання для UI: <code>crit_get_api_key_value()</code> / <code>crit_get_api_key_with_source()</code>.</li>
+					<li><strong>Маскування</strong> — у відображенні значення обрізаються через <code>crit_mask_key()</code> (перші/останні 6 символів).</li>
+					<li><strong>Збереження</strong> — кнопка «Зберегти» записує тільки <em>непорожні</em> поля, щоб випадкове порожнє значення не затерло чинний ключ.</li>
+					<li><strong>Видалення ключа</strong> — у таблиці «Сервісні дії» кнопка «Очистити ключ (БД)» виконує <code>delete_option()</code> для вибраного сервісу.</li>
+					<li><strong>Кеш</strong> — після змін/видалення ключів очищається кеш інтел/гео/пул (<code>crit_purge_all_intel_caches()</code>), щоб нові значення підхопилися відразу.</li>
+					<li><strong>Глобальне очищення кешу</strong> — кнопка «🧽 Очистити кеш інтел/гео/пул» чистить транзієнти з префіксами <code>crit_intel_</code>, <code>crit_geo_</code>, <code>crit_pool_</code>.</li>
+					<li><strong>Безпека</strong> — дії захищені <code>check_admin_referer()</code>; доступ мають тільки користувачі з правами <code>manage_options</code>.</li>
+				</ul>
+				<p><em>Порада:</em> після імпорту/міграції сайту перевір ключі та, за потреби, скористайся «Очистити кеш…», щоб уникнути застарілих інсайтів.</p>
+				<p><small><span style="opacity:.8;">Esc</span> або клік поза вікном — закрити.</small></p>
+			</div>
+		</div>
+	</div>
+	<?php
+
+	// Повідомлення (норіси)
 	echo $notice;
 
 	/* ======= Форма збереження ======= */
@@ -243,11 +290,46 @@ function crit_keys_settings_page() {
 	echo '</form>';
 
 	echo '<hr><p style="color:#666">Під час роботи модуль читає ключі ТІЛЬКИ з БД.</p>';
-	echo '</div>';
+
+	// === JS для модалки Info ===
+	?>
+	<script>
+	// === INFO MODAL (API Keys page) ===
+	(function($){
+		var $modal    = $('#crit-keys-info-modal');
+		var $dialog   = $modal.find('.crit-modal__dialog');
+		var $openBtn  = $('#crit-keys-info-open');
+		var $closeBtn = $('#crit-keys-info-close');
+		var lastFocus = null;
+
+		function openModal(){
+			lastFocus = document.activeElement;
+			$modal.removeAttr('hidden');
+			$openBtn.attr('aria-expanded','true');
+			setTimeout(function(){ $dialog.trigger('focus'); }, 0);
+		}
+		function closeModal(){
+			$modal.attr('hidden','hidden');
+			$openBtn.attr('aria-expanded','false');
+			if (lastFocus) { lastFocus.focus(); }
+		}
+
+		$openBtn.on('click', function(e){ e.preventDefault(); openModal(); });
+		$closeBtn.on('click', function(){ closeModal(); });
+		$modal.on('click', function(e){
+			if ($(e.target).is('[data-close], .crit-modal__backdrop')) { closeModal(); }
+		});
+		$(document).on('keydown', function(e){
+			if (e.key === 'Escape' && !$modal.is('[hidden]')) { e.preventDefault(); closeModal(); }
+		});
+	})(jQuery);
+	</script>
+	<?php
+	echo '</div>'; // .wrap
 }
 
 /* ===========================================================
- * Secret reporter (Ctrl+C+X) → modal → email to fly380.it@gmail.com
+ * Secret reporter (Ctrl+Q) → modal → email to fly380.it@gmail.com
  * Працює лише в адмінці, лише для користувачів з manage_options,
  * показується тільки на сторінці "Critical Logger — API Keys".
  * =========================================================== */
@@ -309,7 +391,7 @@ add_action('admin_footer', function () {
 	$nonce   = wp_create_nonce('crit_secret_send');
 	$ajaxurl = admin_url('admin-ajax.php');
 	?>
-	<!-- ===== Secret reporter modal (Ctrl+C+X) ===== -->
+	<!-- ===== Secret reporter modal (Ctrl+Q) ===== -->
 	<style>
 		#crit-secret-overlay{
 			display:none; position:fixed; inset:0; background:rgba(0,0,0,.35); z-index:100000;
@@ -376,7 +458,7 @@ add_action('admin_footer', function () {
 	function isEditable(el){
 		return el && (
 			el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable ||
-			(el.tagName === 'SELECT') || (el.closest && el.closest('.components-modal__frame')) // Gutenberg модалки
+			(el.tagName === 'SELECT') || (el.closest && el.closest('.components-modal__frame'))
 		);
 	}
 
@@ -405,14 +487,11 @@ add_action('admin_footer', function () {
 
 	/* --- Гаряча комбінація: ТІЛЬКИ Ctrl + Q --- */
 	function isModifierOnly(e){
-		// ігноруємо самі модифікатори
 		return e.key === 'Control' || e.key === 'Shift' || e.key === 'Alt' || e.key === 'Meta'
 			|| e.keyCode === 17 || e.keyCode === 16 || e.keyCode === 18 || e.keyCode === 91;
 	}
 	function onHotkey(e){
-		// не заважаємо набору в інпутах/textarea
 		if (isEditable(document.activeElement)) return;
-		// якщо натиснули лише Ctrl/Shift/Alt/Meta — ігноруємо
 		if (isModifierOnly(e)) return;
 
 		const k = (e.key || '').toLowerCase();
@@ -423,14 +502,13 @@ add_action('admin_footer', function () {
 			openModal();
 		}
 	}
-	// перехоплюємо раніше за інші лісенери
 	window.addEventListener('keydown', onHotkey, true);
 	document.addEventListener('keydown', onHotkey, true);
 
 	form.addEventListener('submit', function(e){
 		e.preventDefault();
 		const btn = document.getElementById('crit-secret-send');
-		btn.disabled = true; btn.textContent = 'Надсилаю...';
+		btn.disabled = true; btn.textContent = 'Надіслaю...';
 
 		const fd = new FormData(form);
 		fd.append('action', 'crit_secret_send');

@@ -634,7 +634,61 @@ add_action('admin_enqueue_scripts', function($hook) {
 function crit_ai_insights_page() {
 	$ai = crit_ai_generate_insights();
 
-	echo '<div class="wrap"><h1>AI аналітика логу</h1>';
+	echo '<div class="wrap">';
+	echo '<div class="crit-admin-header" style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px;">';
+	echo '<h1 style="margin:0;">AI аналітика логу</h1>';
+	echo '<button id="crit-ai-info-open" type="button" class="button button-secondary" aria-haspopup="dialog" aria-expanded="false" aria-controls="crit-ai-info-modal">Info</button>';
+	echo '</div>';
+	?>
+<style id="crit-ai-info-modal-css">
+	#crit-ai-info-modal[hidden]{display:none;}
+	#crit-ai-info-modal{position:fixed;inset:0;z-index:100000;}
+	#crit-ai-info-modal .crit-modal__backdrop{position:absolute;inset:0;background:rgba(0,0,0,.35);}
+	#crit-ai-info-modal .crit-modal__dialog{
+		position:relative;max-width:820px;margin:6vh auto;background:#fff;border-radius:8px;
+		box-shadow:0 10px 30px rgba(0,0,0,.2);padding:20px 22px;outline:0;
+	}
+	#crit-ai-info-modal h2{margin:0 32px 10px 0;}
+	#crit-ai-info-modal .crit-modal__body{line-height:1.55;max-height:65vh;overflow:auto;padding-right:2px;}
+	#crit-ai-info-modal .crit-modal__close{
+		position:absolute;right:12px;top:10px;border:0;background:transparent;font-size:22px;line-height:1;cursor:pointer;
+	}
+	#crit-ai-info-modal .crit-kbd{display:inline-block;border:1px solid #ddd;border-bottom-width:2px;border-radius:4px;padding:0 5px;font:12px/20px monospace;background:#f8f8f8}
+	#crit-ai-info-modal ul{margin:0 0 10px 18px}
+	#crit-ai-info-modal li{margin:6px 0}
+	#crit-ai-info-modal code{background:#f6f7f7;border:1px solid #e2e4e7;border-radius:3px;padding:1px 4px}
+</style>
+<div id="crit-ai-info-modal" role="dialog" aria-modal="true" aria-labelledby="crit-ai-info-title" hidden>
+	<div class="crit-modal__backdrop" data-close="1"></div>
+	<div class="crit-modal__dialog" role="document" tabindex="-1">
+		<button type="button" class="crit-modal__close" id="crit-ai-info-close" aria-label="Закрити" title="Закрити (Esc)">×</button>
+		<h2 id="crit-ai-info-title">Що вміє модуль «AI аналітика»</h2>
+		<div class="crit-modal__body">
+			<ul>
+				<li><strong>Загальний стан</strong> — бейдж (<em>🟢/🟠/🔴</em>) з причинами. Пороги беруться з фактичних метрик (помилки, безпека, GeoBlock, сплески за годинами).</li>
+				<li><strong>Картки-метрики</strong> — всього рядків, помилки/попередження/безпека/GeoBlock/логіни, події за 24 год, унікальні IP.</li>
+				<li><strong>Графіки</strong> (Chart.js):
+					<ul>
+						<li><em>Події по днях</em> — агреговані підсумки за останні ~30 дат.</li>
+						<li><em>Топ країн (Geo)</em> і <em>Топ IP</em> — топ-8 за частотою.</li>
+						<li><em>Розподіл за годинами</em> — мікро-гістограма сплесків.</li>
+					</ul>
+				</li>
+				<li><strong>Останні фрагменти</strong> — списки «Останні помилки» та «Останні події безпеки/GeoBlock».</li>
+				<li><strong>Кнопка «Аналізувати зараз»</strong> — запускає OpenAI-аналіз останніх ~100 рядків:
+					<ul>
+						<li>Ключ береться з опції <code>crit_openai_key</code>, константи <code>CRIT_OPENAI_KEY</code> або <code>$GLOBALS['CL_AI_KEY']</code>.</li>
+						<li>Перед відправкою застосовується скрабер <code>crit_ai_scrub_lines()</code> (редакція токенів, cookie, email, IP, хешів).</li>
+						<li>HTTP-фейловер: cURL → WP streams → raw socket; CA-бандл з <code>wp-includes/certificates/ca-bundle.crt</code> (якщо є).</li>
+					</ul>
+				</li>
+				<li><strong>Продуктивність</strong> — <code>crit_ai_generate_insights()</code> кешує розрахунок на 60с; читання хвоста файлу ~512КБ.</li>
+			</ul>
+			<p><span class="crit-kbd">Esc</span> — закрити; клік по затемненню — теж закриє.</p>
+		</div>
+	</div>
+</div>
+<?php
 
 	$badge_color = '#2d7';
 	if (!empty($ai['risk']['code']) && $ai['risk']['code'] === 'amber') $badge_color = '#f7a600';
@@ -745,5 +799,39 @@ function crit_ai_insights_page() {
 	echo '<input type="submit" name="run_ai_analysis" class="button-primary" value="🔁 Аналізувати зараз">';
 	echo '</form>';
 	echo '<hr><p style="color:#777;">Цей модуль використовує API OpenAI (GPT-4o-mini або GPT-5) для генерації короткого аналізу логів.</p>';
+	?>
+<script>
+// === INFO MODAL (AI page) ===
+(function($){
+	var $modal    = $('#crit-ai-info-modal');
+	var $dialog   = $modal.find('.crit-modal__dialog');
+	var $openBtn  = $('#crit-ai-info-open');
+	var $closeBtn = $('#crit-ai-info-close');
+	var lastFocus = null;
+
+	function openModal(){
+		lastFocus = document.activeElement;
+		$modal.removeAttr('hidden');
+		$openBtn.attr('aria-expanded','true');
+		setTimeout(function(){ $dialog.trigger('focus'); }, 0);
+	}
+	function closeModal(){
+		$modal.attr('hidden','hidden');
+		$openBtn.attr('aria-expanded','false');
+		if (lastFocus) { lastFocus.focus(); }
+	}
+
+	$openBtn.on('click', function(e){ e.preventDefault(); openModal(); });
+	$closeBtn.on('click', function(){ closeModal(); });
+	$modal.on('click', function(e){
+		if ($(e.target).is('[data-close], .crit-modal__backdrop')) { closeModal(); }
+	});
+	$(document).on('keydown', function(e){
+		if (e.key === 'Escape' && !$modal.is('[hidden]')) { e.preventDefault(); closeModal(); }
+	});
+})(jQuery);
+</script>
+<?php
+
 	echo '</div>';
 }

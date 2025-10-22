@@ -78,6 +78,9 @@ if ( is_admin() ) {
 /* Підключаємо основні файли плагіна */
 require_once plugin_dir_path(__FILE__) . 'logger.php';
 require_once plugin_dir_path(__FILE__) . 'logger-hooks.php';
+if (file_exists(plugin_dir_path(__FILE__) . 'privacy.php')) {
+	require_once plugin_dir_path(__FILE__) . 'privacy.php';
+}
 
 /**
  * Розрізає сирий текст лога на окремі записи навіть якщо між ними немає \n
@@ -151,6 +154,32 @@ if (!function_exists('crit_log_time')) {
  */
 function crit_append_log_line(string $file, string $line): void {
 	$line = rtrim($line, "\r\n");
+
+	// Маскуємо лише якщо увімкнено опцію
+	$sanitize_on = (get_option('crit_log_sanitize', '0') === '1');
+
+	if ($sanitize_on) {
+		if (function_exists('crit_sanitize_log_line_structured')) {
+			// Структурний санітайзер сам знає, що саме маскувати
+			$line = crit_sanitize_log_line_structured($line);
+		} else {
+			// Обережний фолбек: маскуємо ТІЛЬКИ username і message, не чіпаючи [IP]
+			if (
+				function_exists('crit_sanitize_text') &&
+				preg_match('/^\[([0-9\- :]+)\]\[([^\]]+)\]\[([^\]]*)\]\[([^\]]+)\]\s?(.*)$/', $line, $m)
+			) {
+				$time     = $m[1];
+				$ip       = $m[2];                 // важливо: не маскуємо, щоб не зламати аналіз
+				$username = crit_sanitize_text($m[3]);
+				$level    = strtoupper(trim($m[4]));
+				$message  = crit_sanitize_text($m[5]);
+
+				$line = '['.$time.']['.$ip.']['.$username.']['.$level.'] '.$message;
+			}
+			// Якщо формат інший — залишаємо як є (UI все одно маскує при виводі)
+		}
+	}
+
 	$need_nl = false;
 	if (file_exists($file) && filesize($file) > 0) {
 		$fp = @fopen($file, 'rb');
@@ -161,13 +190,14 @@ function crit_append_log_line(string $file, string $line): void {
 			if ($last !== "\n") $need_nl = true;
 		}
 	}
+
 	$prefix = $need_nl ? "\n" : '';
 	$result = file_put_contents($file, $prefix . $line . "\n", FILE_APPEND | LOCK_EX);
 	if ($result === false) {
-	crit_log_internal("file_put_contents failed (append) for {$file}");
+		crit_log_internal("file_put_contents failed (append) for {$file}");
+	}
 }
 
-}
 
 /**
  * Швидко читає останні N рядків великого файла (tail).
@@ -324,11 +354,11 @@ function critical_logger_log_table_cb() {
 
 	// Популярні рівні (щоб відрізнити "Інше")
 	$known_levels = [
-	'INFO','WARNING','WARN','ERROR','NOTICE','FATAL','DEPRECATED','SCAN',
-	'USER NOTICE','USER ERROR',
-	'CORE ERROR','CORE WARNING',
-	'COMPILE ERROR','COMPILE WARNING',
-	'PARSE ERROR','STRICT','RECOVERABLE ERROR'
+		'INFO','WARNING','WARN','ERROR','NOTICE','FATAL','DEPRECATED','SCAN',
+		'USER NOTICE','USER ERROR',
+		'CORE ERROR','CORE WARNING',
+		'COMPILE ERROR','COMPILE WARNING',
+		'PARSE ERROR','STRICT','RECOVERABLE ERROR'
 	];
 	$known_map = array_flip($known_levels);
 
@@ -339,10 +369,13 @@ function critical_logger_log_table_cb() {
 	if (isset($allow_map['WARN']) && !isset($allow_map['WARNING'])) $allow_map['WARNING'] = true;
 	if (isset($allow_map['WARNING']) && !isset($allow_map['WARN'])) $allow_map['WARN'] = true;
 
-
 	$lines = crit_tail_entries($log_file, $limit);
 
+	// Чи вмикати маскування у виводі
+	$sanitize_on = (get_option('crit_log_sanitize','0') === '1') && function_exists('crit_sanitize_text');
+
 	ob_start();
+
 	echo '<table class="widefat fixed striped" style="width:100%;">';
 	echo '<thead><tr><th>Час</th><th>IP</th><th>Користувач</th><th>Рівень</th><th>Повідомлення</th><th>Дія</th></tr></thead><tbody>';
 
@@ -358,40 +391,45 @@ function critical_logger_log_table_cb() {
 		$time = $ip = $username = $level = $message = '';
 
 		if (preg_match('/^\[([0-9\- :]+)\]\[([^\]]+)\]\[([^\]]*)\]\[([^\]]+)\]\s?(.*)$/', $line, $m)) {
-			$time	 = $m[1];
-			$ip	   = $m[2];
+			$time     = $m[1];
+			$ip       = $m[2];
 			$username = $m[3];
-			$level	= strtoupper(trim($m[4]));
+			$level    = strtoupper(trim($m[4]));
 			$message  = $m[5];
 		} elseif (preg_match('/\b(?:\d{1,3}\.){3}\d{1,3}\b/', $line, $mm)) {
-			$ip	  = $mm[0];
-			$message = $line;
-			$level   = 'INFO'; // якщо формат не впізнано — вважаємо INFO
+			$ip       = $mm[0];
+			$message  = $line;
+			$level    = 'INFO'; // якщо формат не впізнано — вважаємо INFO
 		} else {
-			$message = $line;
-			$level   = 'INFO';
+			$message  = $line;
+			$level    = 'INFO';
 		}
 
 		// ===== ФІЛЬТР РІВНІВ =====
 		if (!empty($levels)) {
 			$level_is_known = isset($known_map[$level]);
 			$level_allowed  = isset($allow_map[$level]) || (!$level_is_known && $want_other);
-
-			if (!$level_allowed) {
-				// якщо конкретні рівні вибрані, але цей не дозволено — пропускаємо
-				continue;
-			}
+			if (!$level_allowed) continue;
 		}
 		// ==========================
+
+		// Маскування тільки для полів користувача та повідомлення в UI
+		if ($sanitize_on) {
+			$username_out = crit_sanitize_text($username);
+			$message_out  = crit_sanitize_text($message);
+		} else {
+			$username_out = $username;
+			$message_out  = $message;
+		}
 
 		$style = (! empty($ip) && ($ip_counts[$ip] ?? 0) > 10) ? 'color:#c00;font-weight:bold;' : '';
 
 		echo '<tr>';
 		echo '<td style="font-family:monospace;">' . esc_html($time) . '</td>';
 		echo '<td style="' . esc_attr($style) . '">' . esc_html($ip) . '</td>';
-		echo '<td>' . esc_html($username) . '</td>';
+		echo '<td>' . esc_html($username_out) . '</td>';
 		echo '<td><strong>' . esc_html($level) . '</strong></td>';
-		echo '<td style="font-family:monospace; white-space:pre-wrap;">' . esc_html($message) . '</td>';
+		echo '<td style="font-family:monospace; white-space:pre-wrap;">' . esc_html($message_out) . '</td>';
 		echo '<td>';
 
 		if ($ip) {
@@ -1075,6 +1113,15 @@ function crit_count_entries_in_file(string $file, int $chunkSize = 131072): int 
 /* Головна адмін-сторінка для перегляду логів */
 function critical_logger_admin_page() {
 	ob_start();
+// Збереження налаштування "Санітувати PII"
+if (
+	isset($_POST['crit_privacy_save']) &&
+	current_user_can('manage_options') &&
+	check_admin_referer('crit_privacy_save', 'crit_privacy_nonce')
+) {
+	update_option('crit_log_sanitize', isset($_POST['crit_log_sanitize']) ? '1' : '0');
+	echo '<div class="notice notice-success"><p>Налаштування приватності збережено.</p></div>';
+}
 
 	$log_file = crit_log_file();
 	// --- Очистити кеш пул/гео ---
@@ -1439,6 +1486,20 @@ if (
 		. '<input type="submit" class="button" value="Очистити кеш пул" onclick="return confirm(\'Очистити кеш пул?\');">'
 		. '</form>';
 	echo '</div>';
+	$sanitize_current = get_option('crit_log_sanitize', '0') === '1';
+
+	echo '<div style="margin:12px 0; padding:10px; border:1px solid #ddd; background:#fff; border-radius:6px;">';
+	echo '<h3 style="margin-top:0;">Приватність логів</h3>';
+	echo '<form method="post" style="margin:0;">';
+	wp_nonce_field('crit_privacy_save', 'crit_privacy_nonce');
+	echo '<label><input type="checkbox" name="crit_log_sanitize" value="1" '.checked(true, $sanitize_current, false).'> ';
+	echo '🛡️ Санітувати PII (email/IP/телефон) у записах журналу';
+	echo '</label>';
+	echo '<p class="description" style="margin:.5em 0 0; color:#666;">При ввімкненні особисті ідентифікатори у нових рядках лога будуть замінюватися на маски.</p>';
+	echo '<p style="margin-top:10px;"><button type="submit" name="crit_privacy_save" class="button button-primary">Зберегти</button></p>';
+	echo '</form>';
+	echo '</div>';
+
 	// --- Фільтр рівнів лога (UI) ---
 	echo '<div id="crit-level-filters" style="margin:10px 0 12px; padding:8px; border:1px solid #ddd; border-radius:6px; background:#fff;">';
 	echo '<strong>Показувати рівні:</strong> ';

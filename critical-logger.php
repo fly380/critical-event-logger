@@ -1472,11 +1472,33 @@ if (
 				<li><strong>Лічильник записів</strong> — швидкий підрахунок загальної кількості лог-записів.</li>
 				<li><strong>Ротація</strong> — під час відкриття сторінки видаляються записи старші 30 днів (див. <code>critical_logger_cleanup_old_logs()</code> та <code>rotation.php</code>).</li>
 			</ul>
+
+			<h3 style="margin-top:14px;">Рівні подій (що і чим позначається)</h3>
+			<ul>
+				<li><strong>INFO</strong> — звичайні дії: успішний вхід/вихід; реєстрація; оновлення профілю/ролі; створення/оновлення записів; створення/зміни коментарів; додавання медіа; оновлення меню; збереження кастомайзера; успішне відправлення CF7; оновлення опцій (не-секрети); службові події апдейтера, що не є власне <code>update</code>.</li>
+
+				<li><strong>NOTICE</strong> — помітні, але очікувані речі: поодинокі помилки входу; запит/зміна пароля; активація/деактивація плагінів; зміна теми; завершення автооновлень; події апдейтера з <code>action=update</code>; оновлення опцій із маскуванням секретів (<code>pass|secret|key|token|salt</code>); REST 4xx (окрім 404); «звичайні» 404 без ознак сканування; виклики XML-RPC методів.</li>
+
+				<li><strong>WARNING</strong> — потенційний ризик: ≥3 помилки входу з одного IP за 10 хв; видалення користувача/запису/медіа; надання/відкликання супер-адміна в мультисайті; позначення коментаря як спам; редагування файлів у адмінці через AJAX; WooCommerce low stock.</li>
+
+				<li><strong>ERROR</strong> — збої: помилки відправлення пошти (<code>wp_mail_failed</code>); CF7 mail failed; помилки логіну через XML-RPC; REST 5xx.</li>
+
+				<li><strong>FATAL</strong> — фатальні PHP-помилки (падіння процесу): <code>E_ERROR</code>, <code>E_PARSE</code>, <code>E_CORE_ERROR</code>, <code>E_COMPILE_ERROR</code> тощо (перехоплюються обробниками плагіна).</li>
+
+				<li><strong>DEPRECATED</strong> — застарілі виклики/попередження: <code>E_DEPRECATED</code>, <code>E_USER_DEPRECATED</code> (можливий <code>E_STRICT</code>), діагностика для оновлення коду.</li>
+
+				<li><strong>SCAN</strong> — явні ознаки сканування/атак: ≥6 помилок входу з одного IP за 10 хв; REST 404; «підозрілі» 404 (звернення до <code>.php</code>/<code>.php.suspected</code>, PHP у <code>/wp-content/plugins|themes/</code>, довгі токени на <code>.html</code> тощо).</li>
+			</ul>
+			<p style="margin:8px 0 12px; color:#444;">
+				<strong>Ескалація брутфорсу:</strong> 1–2 спроби → <code>NOTICE</code>, 3–5 → <code>WARNING</code>, 6+ → <code>SCAN</code> (вікно <code>CRIT_BRUTEFAIL_WINDOW=600</code> c).
+			</p>
+
 			<p><strong>Джерела даних:</strong> пул через Team&nbsp;Cymru (BGP), RDAP (офіційні RIR), RIPE; гео — <code>ipapi.co</code> / <code>ipwho.is</code> з кешуванням.</p>
 			<p><span class="crit-kbd">Esc</span> — закрити модалку. Клік поза вікном — теж закриє.</p>
 		</div>
 	</div>
 </div>
+
 <?php
 
 	if (! file_exists($log_file)) {
@@ -1507,17 +1529,7 @@ if (
 	echo '</div>';
 	$sanitize_current = get_option('crit_log_sanitize', '0') === '1';
 
-	echo '<div style="margin:12px 0; padding:10px; border:1px solid #ddd; background:#fff; border-radius:6px;">';
-	echo '<h3 style="margin-top:0;">Приватність логів</h3>';
-	echo '<form method="post" style="margin:0;">';
-	wp_nonce_field('crit_privacy_save', 'crit_privacy_nonce');
-	echo '<label><input type="checkbox" name="crit_log_sanitize" value="1" '.checked(true, $sanitize_current, false).'> ';
-	echo '🛡️ Санітувати PII (email/IP/телефон) у записах журналу';
-	echo '</label>';
-	echo '<p class="description" style="margin:.5em 0 0; color:#666;">При ввімкненні особисті ідентифікатори у нових рядках лога будуть замінюватися на маски.</p>';
-	echo '<p style="margin-top:10px;"><button type="submit" name="crit_privacy_save" class="button button-primary">Зберегти</button></p>';
-	echo '</form>';
-	echo '</div>';
+	
 
 	// --- Фільтр рівнів лога (UI) ---
 	echo '<div id="crit-level-filters" style="margin:10px 0 12px; padding:8px; border:1px solid #ddd; border-radius:6px; background:#fff;">';
@@ -1552,6 +1564,18 @@ if (
 	wp_nonce_field('manual_block_ip_action', 'manual_block_ip_nonce', true, true);
 	echo '<input type="text" name="manual_ip_address" placeholder="Введіть IP-адресу" style="width:200px;"> ';
 	echo '<input type="submit" name="manual_block_ip" class="button button-primary" value="Заблокувати">';
+	echo '</form>';
+	echo '</div>';
+	
+	echo '<div style="margin:12px 0; padding:10px; border:1px solid #ddd; background:#fff; border-radius:6px;">';
+	echo '<h3 style="margin-top:0;">Приватність логів</h3>';
+	echo '<form method="post" style="margin:0;">';
+	wp_nonce_field('crit_privacy_save', 'crit_privacy_nonce');
+	echo '<label><input type="checkbox" name="crit_log_sanitize" value="1" '.checked(true, $sanitize_current, false).'> ';
+	echo '🛡️ Санітувати PII (email/IP/телефон) у записах журналу';
+	echo '</label>';
+	echo '<p class="description" style="margin:.5em 0 0; color:#666;">При ввімкненні особисті ідентифікатори у нових рядках лога будуть замінюватися на маски.</p>';
+	echo '<p style="margin-top:10px;"><button type="submit" name="crit_privacy_save" class="button button-primary">Зберегти</button></p>';
 	echo '</form>';
 	echo '</div>';
 	?>

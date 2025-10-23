@@ -460,7 +460,9 @@ function crit_geoblock_settings_page() {
 			echo $verChip;
 		echo '</div>';
 	echo '</div>';
-
+	// Кнопка відкриття модалки
+      echo '<button type="button" id="crit-geo-info-open" class="button button-secondary" aria-haspopup="dialog" aria-expanded="false" aria-controls="crit-geo-info-modal">Info</button>';
+    echo '</div>';
 	// === ПОПЕРЕДЖЕННЯ про самоблок (якщо доречно) ===
 	if (!$reverse && $myCC && in_array($myCC, array_map('trim', explode(',', strtoupper($countriesStr))), true)) {
 		echo '<div class="notice notice-error notice-inline"><p>⚠️ У чорному списку є ваша країна <strong>'.esc_html($myCC).'</strong>. '
@@ -570,6 +572,125 @@ function crit_geoblock_settings_page() {
 	echo '</div>';
 
 	echo '</form>';
+	// === INFO MODAL: довідка по GeoBlock ===
+echo '<style id="crit-geo-info-css">
+#crit-geo-info-modal[hidden]{display:none;}
+#crit-geo-info-modal{position:fixed;inset:0;z-index:100000;}
+#crit-geo-info-modal .crit-modal__backdrop{position:absolute;inset:0;background:rgba(0,0,0,.35);}
+#crit-geo-info-modal .crit-modal__dialog{
+  position:relative;max-width:880px;margin:6vh auto;background:#fff;border-radius:10px;
+  box-shadow:0 10px 30px rgba(0,0,0,.25);padding:18px 20px;outline:0;border:1px solid #e5e7eb;
+}
+#crit-geo-info-modal h2{margin:0 40px 6px 0;font-size:20px}
+#crit-geo-info-modal .crit-modal__body{line-height:1.55;max-height:70vh;overflow:auto;padding-right:4px}
+#crit-geo-info-modal .crit-modal__body h3{margin:14px 0 6px;font-size:15px}
+#crit-geo-info-modal .crit-modal__body ul{margin:6px 0 10px 20px}
+#crit-geo-info-modal .crit-modal__body li{margin:4px 0}
+#crit-geo-info-modal .crit-modal__body code{background:#f6f7f7;border:1px solid #e2e4e7;border-radius:3px;padding:1px 4px}
+#crit-geo-info-modal .crit-modal__close{
+  position:absolute;right:12px;top:10px;border:0;background:transparent;font-size:22px;line-height:1;cursor:pointer;
+}
+#crit-geo-info-modal .crit-kbd{display:inline-block;border:1px solid #ddd;border-bottom-width:2px;border-radius:4px;padding:0 5px;font:12px/20px monospace;background:#f8f8f8}
+#crit-geo-info-modal .crit-note{color:#64748b;font-size:12px}
+</style>';
+
+echo '<div id="crit-geo-info-modal" role="dialog" aria-modal="true" aria-labelledby="crit-geo-info-title" hidden>
+  <div class="crit-modal__backdrop" data-close="1"></div>
+  <div class="crit-modal__dialog" role="document" tabindex="-1">
+    <button type="button" class="crit-modal__close" id="crit-geo-info-close" aria-label="Закрити" title="Закрити (Esc)">×</button>
+    <h2 id="crit-geo-info-title">Довідка: GeoBlock</h2>
+    <div class="crit-modal__body">
+      <h3>Що робить GeoBlock</h3>
+      <ul>
+        <li>Обмежує доступ до сайту за країною відвідувача (frontend). Адміністратори, <code>wp-admin</code>, AJAX/CRON — не блокуються.</li>
+        <li>Має два режими: <em>Blacklist</em> (блокуємо перелік країн) та <em>Whitelist</em> (дозволяємо лише перелік країн).</li>
+      </ul>
+
+      <h3>Як визначається країна (консенсус)</h3>
+      <ul>
+        <li>Джерела: <code>HTTP_CF_IPCOUNTRY</code> (якщо сайт за Cloudflare), <code>ip-api.com</code>, <code>ipwho.is</code>, <code>ipapi.co</code>.</li>
+        <li><strong>Впевненість</strong>: коли співпало ≥2 джерела або <code>Cloudflare</code> збігся з будь-яким іншим.</li>
+        <li>Коли невпевнено або країна <code>??</code> — спрацьовує <em>Fail-Open</em> (пропускаємо), якщо опція увімкнена.</li>
+        <li>Кеш GEO: впевнено — ~2 год; невпевнено — ~10 хв.</li>
+      </ul>
+
+      <h3>Опції</h3>
+      <ul>
+        <li><strong>Увімкнути GeoBlock</strong> — вмикає перевірку для фронтенду.</li>
+        <li><strong>Режим “дозволені країни”</strong> — <em>Whitelist</em>; без нього — <em>Blacklist</em>.</li>
+        <li><strong>Коди країн</strong> — ISO-2 через кому (напр. <code>UA, PL, US</code>).</li>
+        <li><strong>Allow IP</strong> — список IP / CIDR або діапазони <code>start-end</code>, які <em>завжди</em> дозволені.</li>
+        <li><strong>Довіра до проксі</strong> — <code>auto | yes | no</code>. Дозволяє брати реальний IP з <code>CF-Connecting-IP</code>, <code>X-Forwarded-For</code>, <code>X-Real-IP</code>.</li>
+        <li><strong>Режим відповіді</strong> — <code>403</code>, <code>404</code>, <code>451</code>, <code>redirect</code> або <code>custom</code>.</li>
+        <li><strong>Redirect URL</strong> — куди перенаправляти у режимі <em>redirect</em>.</li>
+        <li><strong>Custom HTML</strong> — власне повідомлення при блокуванні у режимі <em>custom</em>.</li>
+        <li><strong>Geo-cache TTL</strong> — тривалість кешування відповіді GEO.</li>
+        <li><strong>Fail-Open</strong> — якщо GEO-сервіси недоступні/невпевнені, трафік пропускається.</li>
+        <li><strong>Превʼю</strong> — “сухий запуск”: лише логування без реального блокування.</li>
+        <li><strong>Інтел (опційно)</strong> — якщо підключено <code>intel.php</code>, блокує при <em>score</em> ≥ порогу.</li>
+        <li><strong>Захист від самоблокування</strong> — під час збереження з <em>Blacklist</em> автоматично прибирає вашу країну зі списку.</li>
+      </ul>
+
+      <h3>Логування</h3>
+      <ul>
+        <li>Короткий формат: <code>Заблоковано вхід з країни CC (IP)</code>.</li>
+        <li>Якщо User-Agent містить <code>bingbot/2.0</code> або <code>SemrushBot/7~bl</code> — додається мітка <code>(bingbot)</code> / <code>(SemrushBot)</code>.</li>
+        <li>У режимі “Превʼю” рівень <code>INFO</code> з префіксом <code>ПРЕВʼЮ:</code>. Дозволи/Fail-Open у лог не пишуться.</li>
+      </ul>
+
+      <h3>Інфраструктура й безпека</h3>
+      <ul>
+        <li>Працює з реальним IP клієнта (Cloudflare/проксі враховуються згідно з “Довіра до проксі”).</li>
+        <li>Плагін <em>не</em> змінює <code>.htaccess</code>. У випадку проблем — просто вимкніть модуль.</li>
+      </ul>
+
+      <h3>Поради</h3>
+      <ul>
+        <li>Перевірку власного доступу дивись у блоці “Діагностика”.</li>
+        <li>Швидке збереження: <span class="crit-kbd">Ctrl</span> + <span class="crit-kbd">S</span>.</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  var modal  = document.getElementById("crit-geo-info-modal");
+  var openBn = document.getElementById("crit-geo-info-open");
+  var closeBn= document.getElementById("crit-geo-info-close");
+  var dialog = modal ? modal.querySelector(".crit-modal__dialog") : null;
+  var lastFocus = null;
+
+  function openModal(){
+    if(!modal) return;
+    lastFocus = document.activeElement;
+    modal.removeAttribute("hidden");
+    if(openBn) openBn.setAttribute("aria-expanded","true");
+    setTimeout(function(){ if(dialog){ dialog.focus(); } }, 0);
+  }
+  function closeModal(){
+    if(!modal) return;
+    modal.setAttribute("hidden","hidden");
+    if(openBn) openBn.setAttribute("aria-expanded","false");
+    if(lastFocus && typeof lastFocus.focus === "function"){ lastFocus.focus(); }
+  }
+
+  if(openBn) openBn.addEventListener("click", function(e){ e.preventDefault(); openModal(); });
+  if(closeBn) closeBn.addEventListener("click", closeModal);
+  if(modal){
+    modal.addEventListener("click", function(e){
+      if(e.target && (e.target.getAttribute("data-close") || e.target.classList.contains("crit-modal__backdrop"))){
+        closeModal();
+      }
+    });
+  }
+  document.addEventListener("keydown", function(e){
+    if(e.key === "Escape" && modal && !modal.hasAttribute("hidden")){
+      e.preventDefault(); closeModal();
+    }
+  });
+})();
+</script>';
 
 	// Невеличкий JS: підсвічування ризику самоблоку (лайв)
 	echo '<script>

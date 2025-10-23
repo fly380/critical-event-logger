@@ -438,7 +438,6 @@ function crit_geoblock_settings_page() {
 		.row label{display:block;margin-bottom:6px}
 		input[type="text"],input[type="url"],textarea,select{width:100%;max-width:100%}
 		textarea{min-height:90px}
-
 		.sticky-save{position:sticky;bottom:0;z-index:10;background:#fff;border:1px solid var(--c-border);border-radius:10px;padding:10px;display:flex;justify-content:space-between;align-items:center;margin-top:12px}
 		.sticky-save .note{font-size:12px;color:var(--c-muted)}
 		.kbd{display:inline-block;border:1px solid #ddd;border-bottom-width:2px;border-radius:4px;padding:0 5px;font:12px/20px monospace;background:#f8f8f8}
@@ -459,7 +458,7 @@ function crit_geoblock_settings_page() {
 				: '<span class="chip ok">Вердикт: ALLOW</span>';
 			echo $verChip;
 		echo '</div>';
-	echo '</div>';
+
 	// Кнопка відкриття модалки
       echo '<button type="button" id="crit-geo-info-open" class="button button-secondary" aria-haspopup="dialog" aria-expanded="false" aria-controls="crit-geo-info-modal">Info</button>';
     echo '</div>';
@@ -493,7 +492,7 @@ function crit_geoblock_settings_page() {
 
 		// Країни
 		echo '<div class="card">';
-		echo '<h2>Країни</h2><div class="desc">ISO-коди через кому (напр. <code>UA, PL, US</code>). <span class="kbd">Ctrl</span> + <span class="kbd">S</span> — швидке збереження.</div>';
+		echo '<h2>Країни</h2><div class="desc">ISO-коди через кому (напр. <code>UA, PL, US</code>)</div>';
 		echo '<div class="row"><label for="crit_geo_countries">Коди країн (ISO-2):</label>
 			<input id="crit_geo_countries" type="text" name="crit_geoblock_countries" value="'.esc_attr($countriesStr).'" placeholder="UA, PL, US"></div>';
 		echo '<div class="row"><small class="desc" id="crit_geo_self_hint" style="display:none;">⚠️ У списку виявлено вашу країну — це призведе до блокування (у blacklist). Збереження автоматично її прибере, якщо увімкнено захист.</small></div>';
@@ -567,7 +566,6 @@ function crit_geoblock_settings_page() {
 
 	// Липка панель Зберегти
 	echo '<div class="sticky-save">';
-	echo '<span class="note">Порада: натисни <span class="kbd">Ctrl</span>+<span class="kbd">S</span> для швидкого збереження</span>';
 	echo '<div><input type="submit" name="crit_geoblock_save" class="button button-primary" value="💾 Зберегти"></div>';
 	echo '</div>';
 

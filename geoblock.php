@@ -150,12 +150,29 @@ function crit_geoblock_country_consensus(string $ip): array {
 		if (preg_match('/^[A-Z]{2}$/', $cf)) $sources['cf'] = $cf;
 	}
 
-	// ip-api (HTTP)
-	$r1 = wp_remote_get("http://ip-api.com/json/{$ip}?fields=status,countryCode", ['timeout'=>6]);
-	if (!is_wp_error($r1)) {
-		$d1 = json_decode(wp_remote_retrieve_body($r1), true);
-		if (($d1['status'] ?? '') === 'success' && !empty($d1['countryCode'])) {
-			$sources['ipapi'] = strtoupper($d1['countryCode']);
+	// ip-api → HTTPS: pro.ip-api.com (з ключем) або country.is (без ключа)
+	$ipapi_pro_key = defined('CRIT_IPAPI_PRO_KEY') ? CRIT_IPAPI_PRO_KEY : '';
+	if (!empty($ipapi_pro_key)) {
+		$r1 = wp_remote_get(
+			sprintf('https://pro.ip-api.com/json/%s?fields=status,countryCode&key=%s', rawurlencode($ip), rawurlencode($ipapi_pro_key)),
+			['timeout' => 6]
+		);
+		if (!is_wp_error($r1)) {
+			$d1 = json_decode(wp_remote_retrieve_body($r1), true);
+			if (($d1['status'] ?? '') === 'success' && !empty($d1['countryCode'])) {
+				$sources['ipapi'] = strtoupper($d1['countryCode']); // зберігаємо ключ 'ipapi' для сумісності
+			}
+		}
+	} else {
+		$r1 = wp_remote_get(
+			sprintf('https://country.is/%s', rawurlencode($ip)),
+			['timeout' => 6]
+		);
+		if (!is_wp_error($r1)) {
+			$d1 = json_decode(wp_remote_retrieve_body($r1), true);
+			if (!empty($d1['country']) && preg_match('/^[A-Z]{2}$/', strtoupper($d1['country']))) {
+				$sources['ipapi'] = strtoupper($d1['country']); // той самий ключ для існуючої логіки нижче
+			}
 		}
 	}
 

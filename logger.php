@@ -55,20 +55,11 @@ HTA;
 }
 if (!function_exists('crit_log_file')) {
 	function crit_log_file(): string {
-		$path = trailingslashit(crit_logs_dir()) . 'events.log';
-
-		// Якщо файла немає — створити порожній та виставити безпечні права
-		if (!@file_exists($path)) {
-			$h = @fopen($path, 'a'); // створить файл, якщо його немає
-			if (is_resource($h)) {
-				@fclose($h);
-				@chmod($path, 0640); // -rw-r-----
-			}
-		}
-
-		return $path;
+		return trailingslashit(crit_logs_dir()) . 'events.log';
 	}
 }
+
+
 /**
  * Основна функція логування повідомлень.
  *

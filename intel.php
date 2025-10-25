@@ -7,11 +7,14 @@
  */
 
 if (!defined('ABSPATH')) exit;
+
 if (!defined('CRIT_ABUSEIPDB_KEY')) define('CRIT_ABUSEIPDB_KEY', '');
 if (!defined('CRIT_VIRUSTOTAL_KEY')) define('CRIT_VIRUSTOTAL_KEY', '');
-if (!defined('CRIT_CROWDSEC_KEY')) define('CRIT_CROWDSEC_KEY', '');
+// Залишимо визначення, але ключ більше ніде не використовується:
+// if (!defined('CRIT_CROWDSEC_KEY')) define('CRIT_CROWDSEC_KEY', '');
 if (!defined('CRIT_INTEL_CACHE_TTL')) define('CRIT_INTEL_CACHE_TTL', 12 * HOUR_IN_SECONDS);
 if (!defined('CRIT_IP_THRESHOLD')) define('CRIT_IP_THRESHOLD', 8);
+
 // ---- Єдині геттери ключів (пріоритет: БД -> wp-config.php) ----
 if (!function_exists('crit_get_option_or_const')) {
 	function crit_get_option_or_const(string $const_name, string $option_name): string {
@@ -25,19 +28,18 @@ if (!function_exists('crit_get_option_or_const')) {
 		return '';
 	}
 }
+
 // Звідси й далі у всьому файлі використовуй ці змінні, а НЕ constant('CRIT_*')
 $abuse_key = crit_get_option_or_const('CRIT_ABUSEIPDB_KEY', 'crit_abuseipdb_key');
 $vt_key    = crit_get_option_or_const('CRIT_VIRUSTOTAL_KEY', 'crit_virustotal_key');
-$cs_key    = crit_get_option_or_const('CRIT_CROWDSEC_KEY',   'crit_crowdsec_key');
-$ai_key    = crit_get_option_or_const('CRIT_OPENAI_KEY',     'crit_openai_key');
+// $cs_key  — повністю прибрано
+$ai_key    = crit_get_option_or_const('CRIT_OPENAI_KEY', 'crit_openai_key');
 
 // зробимо їх доступними у функціях через global
 $GLOBALS['CL_ABUSE_KEY'] = $abuse_key;
 $GLOBALS['CL_VT_KEY']    = $vt_key;
-$GLOBALS['CL_CS_KEY']    = $cs_key;
+// $GLOBALS['CL_CS_KEY']  — прибрано
 $GLOBALS['CL_AI_KEY']    = $ai_key;
-
-
 
 /**
  * Отримати IP, що часто з’являються у логах (для аналітики)
@@ -59,45 +61,8 @@ function crit_get_suspicious_ips($log_file) {
 }
 
 /**
- * Отримання або оновлення CrowdSec токена автоматично
- */
-function crit_get_crowdsec_token() {
-	$cs_key = $GLOBALS['CL_CS_KEY'] ?? '';
-	if ($cs_key === '') return '';
-
-	// кеш окремо на конкретний ключ, щоб токени не змішувалися
-	$cache_key = 'crit_crowdsec_token_' . md5($cs_key);
-	$cached = get_transient($cache_key);
-	if ($cached) return $cached;
-
-	$resp = wp_remote_post('https://cti.api.crowdsec.net/v2/api/token', array(
-		'headers' => array(
-			'X-API-KEY' => $cs_key,
-			'accept'	=> 'application/json',
-			'user-agent'=> 'CriticalLogger/2.1'
-		),
-		'timeout' => 15,
-	));
-
-	if (is_wp_error($resp)) {
-		error_log('[CriticalLogger] CrowdSec token request failed: ' . $resp->get_error_message());
-		return '';
-	}
-
-	$body  = json_decode(wp_remote_retrieve_body($resp), true);
-	$token = $body['token'] ?? '';
-
-	if ($token) {
-		set_transient($cache_key, $token, 23 * HOUR_IN_SECONDS);
-		return $token;
-	}
-
-	error_log('[CriticalLogger] CrowdSec token response invalid: ' . wp_remote_retrieve_body($resp));
-	return '';
-}
-
-/**
- * Перевірка IP через AbuseIPDB, VirusTotal, CrowdSec, Spamhaus.
+ * Перевірка IP через AbuseIPDB, VirusTotal, Spamhaus.
+ * (CrowdSec повністю прибрано)
  */
 function crit_check_ip_intel($ip) {
 	$cache_key = 'crit_intel_' . md5($ip);
@@ -105,13 +70,11 @@ function crit_check_ip_intel($ip) {
 
 	$abuse_key = $GLOBALS['CL_ABUSE_KEY'] ?? '';
 	$vt_key    = $GLOBALS['CL_VT_KEY']    ?? '';
-	$cs_key    = $GLOBALS['CL_CS_KEY']    ?? '';
 
 	$result = array(
 		'ip'           => $ip,
 		'abuseipdb'    => 0,
 		'virustotal'   => 0,
-		'crowdsec'     => false,
 		'spamhaus'     => false,
 		'score'        => 0,
 		'is_malicious' => false,
@@ -181,29 +144,6 @@ function crit_check_ip_intel($ip) {
 		}
 	}
 
-	// === CrowdSec (через токен від $cs_key) ===
-	if ($cs_key !== '') {
-		$token = crit_get_crowdsec_token();
-		if ($token) {
-			$r = wp_remote_get("https://cti.api.crowdsec.net/v2/smoke/ips/$ip", array(
-				'headers' => array(
-					'Authorization' => 'Bearer ' . $token,
-					'accept'        => 'application/json',
-					'User-Agent'    => 'CriticalLogger/2.1'
-				),
-				'timeout' => 10,
-			));
-			if (!is_wp_error($r)) {
-				$d = json_decode(wp_remote_retrieve_body($r), true);
-				if (!empty($d['classifications']) || !empty($d['attack_details']) || (($d['background_noise_score'] ?? 0) > 0)) {
-					$result['crowdsec'] = true;
-					$sources[] = 'CrowdSec';
-					$result['is_malicious'] = true;
-				}
-			}
-		}
-	}
-
 	// === Spamhaus DNSBL ===
 	$rev = implode('.', array_reverse(explode('.', $ip))) . '.zen.spamhaus.org';
 	if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) && checkdnsrr($rev, 'A')) {
@@ -217,7 +157,6 @@ function crit_check_ip_intel($ip) {
 	if (!empty($result['abuseipdb'])) $total_score += (int) $result['abuseipdb'];
 	if (!empty($result['virustotal'])) $total_score += ((int) $result['virustotal']) * 10;
 	if (!empty($result['spamhaus']))   $total_score += 30;
-	if (!empty($result['crowdsec']))   $total_score += 40;
 
 	$result['score']  = min($total_score, 150);
 	$result['source'] = $sources ? implode(', ', $sources) : '-';

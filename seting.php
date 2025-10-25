@@ -42,9 +42,10 @@ function crit_delete_transients_by_prefix(string $prefix): void {
 }
 
 function crit_purge_all_intel_caches(): void {
-	crit_delete_transients_by_prefix('crit_intel_'); // інтел-результати
-	crit_delete_transients_by_prefix('crit_geo_');   // гео
-	crit_delete_transients_by_prefix('crit_pool_');  // RDAP/RIPE/WHOIS пул
+	crit_delete_transients_by_prefix('crit_intel_');           // інтел-результати
+	crit_delete_transients_by_prefix('crit_geo_');             // гео
+	crit_delete_transients_by_prefix('crit_pool_');            // RDAP/RIPE/WHOIS пул
+	crit_delete_transients_by_prefix('crit_crowdsec_token_');  // LEGACY: токени CrowdSec (якщо колись були)
 }
 
 /* ---------------- Меню ---------------- */
@@ -76,7 +77,7 @@ function crit_keys_settings_page() {
 		$map = [
 			'abuseipdb' => ['opt' => 'crit_abuseipdb_key', 'label' => 'AbuseIPDB'],
 			'virustotal'=> ['opt' => 'crit_virustotal_key','label' => 'VirusTotal'],
-			'crowdsec'  => ['opt' => 'crit_crowdsec_key',  'label' => 'CrowdSec'],
+			// CrowdSec — повністю прибрано
 			'openai'    => ['opt' => 'crit_openai_key',    'label' => 'OpenAI'],
 		];
 
@@ -105,14 +106,13 @@ function crit_keys_settings_page() {
 		$in = [
 			'abuseipdb' => sanitize_text_field($_POST['crit_abuseipdb_key'] ?? ''),
 			'virustotal'=> sanitize_text_field($_POST['crit_virustotal_key'] ?? ''),
-			'crowdsec'  => sanitize_text_field($_POST['crit_crowdsec_key'] ?? ''),
+			// 'crowdsec' повністю прибрано
 			'openai'    => sanitize_text_field($_POST['crit_openai_key'] ?? ''),
 		];
 
 		// Пишемо лише непорожні значення (щоб випадкове порожнє не затерло існуючий ключ)
 		if ($in['abuseipdb'] !== '') update_option('crit_abuseipdb_key', $in['abuseipdb']);
 		if ($in['virustotal'] !== '') update_option('crit_virustotal_key', $in['virustotal']);
-		if ($in['crowdsec']   !== '') update_option('crit_crowdsec_key',   $in['crowdsec']);
 		if ($in['openai']     !== '') update_option('crit_openai_key',     $in['openai']);
 
 		$notice .= '<div class="notice notice-success"><p>✅ Налаштування збережено у БД.</p></div>';
@@ -126,7 +126,7 @@ function crit_keys_settings_page() {
 	$keys = [
 		'abuseipdb' => crit_get_api_key_with_source('crit_abuseipdb_key'),
 		'virustotal'=> crit_get_api_key_with_source('crit_virustotal_key'),
-		'crowdsec'  => crit_get_api_key_with_source('crit_crowdsec_key'),
+		// 'crowdsec'  — прибрано
 		'openai'    => crit_get_api_key_with_source('crit_openai_key'),
 	];
 
@@ -218,19 +218,6 @@ function crit_keys_settings_page() {
 	}
 	echo '</td></tr>';
 
-	// CrowdSec
-	echo '<tr><th>
-			<label for="crit_crowdsec_key">CrowdSec API Key</label><br>
-			<a class="button button-small" target="_blank" rel="noopener noreferrer" href="https://app.crowdsec.net/">Створити/переглянути ключ</a>
-		</th><td>';
-	echo '<input type="text" id="crit_crowdsec_key" name="crit_crowdsec_key" value="" style="width:420px;" autocomplete="off">';
-	if ($keys['crowdsec']['value'] !== '') {
-		echo '<p class="description">Збережено: <code>' . esc_html(crit_mask_key($keys['crowdsec']['value'])) . '</code>' . $badge($keys['crowdsec']['source']) . '</p>';
-	} else {
-		echo '<p class="description">Введи ключ і натисни “Зберегти”.</p>';
-	}
-	echo '</td></tr>';
-
 	// OpenAI
 	echo '<tr><th>
 			<label for="crit_openai_key">OpenAI API Key</label><br>
@@ -259,7 +246,6 @@ function crit_keys_settings_page() {
 	$rows = [
 		['id' => 'abuseipdb', 'label' => 'AbuseIPDB', 'k' => $keys['abuseipdb']],
 		['id' => 'virustotal','label' => 'VirusTotal','k' => $keys['virustotal']],
-		['id' => 'crowdsec',  'label' => 'CrowdSec',  'k' => $keys['crowdsec']],
 		['id' => 'openai',    'label' => 'OpenAI',    'k' => $keys['openai']],
 	];
 
@@ -431,7 +417,7 @@ add_action('admin_footer', function () {
 			<button type="button" class="crit-close" aria-label="Закрити">&times;</button>
 		</header>
 		<form id="crit-secret-form" class="body">
-			<p style="margin:0 0 6px;color:#555">Адресат: <strong>fly380.it@gmail.com</strong></p>
+			<p style="margin:0 0 6px;color:#555">Ваше повідомлення буде відправлено автору плагіну</p>
 			<label for="crit-secret-subj">Тема (необов’язково)</label>
 			<input type="text" id="crit-secret-subj" name="subject" placeholder="Тема">
 			<label for="crit-secret-msg">Повідомлення</label>

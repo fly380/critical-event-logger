@@ -44,8 +44,8 @@ add_action('wp_ajax_critical_logger_intel_table', function () {
 			$details = [];
 			if (!empty($intel['abuseipdb'])) $details[] = 'AbuseIPDB (' . $intel['abuseipdb'] . '%)';
 			if (!empty($intel['virustotal'])) $details[] = 'VirusTotal (' . $intel['virustotal'] . ' детектів)';
-			if (!empty($intel['spamhaus'])) $details[] = 'Spamhaus';
-			if (!empty($intel['crowdsec'])) $details[] = 'CrowdSec';
+			if (!empty($intel['spamhaus']))   $details[] = 'Spamhaus';
+			// CrowdSec — повністю прибрано
 			$details_str = $details ? implode(', ', $details) : '-';
 
 			$row_style = $score >= 60 ? 'background:#ffd7d7;' : ($score >= 20 ? 'background:#fff4cc;' : 'background:#eaffea;');
@@ -144,7 +144,6 @@ function crit_intel_admin_page() {
 						<ul>
 							<li><code>AbuseIPDB</code> — <code>crit_abuseipdb_key</code> / <code>CRIT_ABUSEIPDB_KEY</code> → <em>abuseConfidenceScore</em> (%).</li>
 							<li><code>VirusTotal</code> — <code>crit_virustotal_key</code> / <code>CRIT_VIRUSTOTAL_KEY</code> → «детекти» (malicious/suspicious).</li>
-							<li><code>CrowdSec</code> — <code>crit_crowdsec_key</code> / <code>CRIT_CROWDSEC_KEY</code> (авто-токен, кеш ~23год) → класифікації/атаки/фон.</li>
 							<li><code>Spamhaus ZEN</code> — без ключа, DNSBL для IPv4.</li>
 						</ul>
 					</li>
@@ -153,20 +152,18 @@ function crit_intel_admin_page() {
 							<li>AbuseIPDB: +<code>abuseConfidenceScore</code> (0–100)</li>
 							<li>VirusTotal: <code>детекти × 10</code></li>
 							<li>Spamhaus: +30, якщо в списках</li>
-							<li>CrowdSec: +40, якщо є збіг</li>
 							<li>Кеп: максимум 150; підсвітка рядка: ≥60 — червоний, ≥20 — жовтий, інакше зелений.</li>
 						</ul>
 					</li>
 					<li><strong>Коли «❌ Підозрілий»</strong>:
 						<ul>
-							<li>Будь-який явний негатив із VT/Spamhaus/CrowdSec, або</li>
+							<li>Будь-який явний негатив із VT/Spamhaus, або</li>
 							<li><em>score</em> ≥ 80, або <em>кілька джерел</em> з тригерами.</li>
 						</ul>
 					</li>
 					<li><strong>Кешування</strong>:
 						<ul>
 							<li>Інтел-відповіді по IP: транзієнт на 12 год (<code>CRIT_INTEL_CACHE_TTL</code>).</li>
-							<li>Токен CrowdSec: ~23 год (окремо на ключ).</li>
 							<li>Кнопка «🧽 Очистити кеш інтел/гео/пул» — форсить свіже опитування.</li>
 						</ul>
 					</li>
@@ -178,7 +175,7 @@ function crit_intel_admin_page() {
 					</li>
 					<li><strong>Приватність</strong>: назовні відправляються тільки IP та службові заголовки; ключі лежать у WP-опціях/константах. Ліміти API знімаються кешем.</li>
 				</ul>
-				<p><strong>Де задати ключі:</strong> <code>crit_abuseipdb_key</code>, <code>crit_virustotal_key</code>, <code>crit_crowdsec_key</code> (або їхні константи). Для AI — <code>crit_openai_key</code>/<code>CRIT_OPENAI_KEY</code>.</p>
+				<p><strong>Де задати ключі:</strong> <code>crit_abuseipdb_key</code>, <code>crit_virustotal_key</code>. Для AI — <code>crit_openai_key</code>/<code>CRIT_OPENAI_KEY</code>.</p>
 				<p><span class="crit-kbd">Esc</span> — закрити модалку; клік поза вікном — також закриє.</p>
 			</div>
 		</div>

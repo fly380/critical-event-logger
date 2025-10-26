@@ -30,7 +30,6 @@ jobs:
             composer install --no-dev --prefer-dist --no-interaction
           fi
 
-      # ✅ Копіюємо тільки потрібне у ZIP
       - name: Prepare build folder (rsync with excludes)
         run: |
           mkdir -p build/critical-event-logger
@@ -55,49 +54,40 @@ jobs:
         run: |
           zip -r critical-event-logger.zip critical-event-logger
 
-      # 🆕 Витягнути релізні нотатки з CHANGELOG.md для поточного тега
+      # Вирізаємо секцію для поточного тега з CHANGELOG.md і кладемо в файл
       - name: Extract changelog section
         id: notes
         shell: bash
         run: |
-          TAG="${GITHUB_REF_NAME}"        # v2.1.2
-          VER="${TAG#v}"                  # 2.1.2
-          if [ ! -f CHANGELOG.md ]; then
-            echo "body=*No CHANGELOG.md found*" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          # Вирізаємо секцію для версії
-          awk -v ver="$VER" '
-            BEGIN{found=0}
-            # Початок секції: "## [2.1.2]" або "## 2.1.2"
-            /^##[[:space:]]*(\[?)[0-9]/{ 
-              if(found) exit
-              line=$0
-              gsub(/\r/,"",line)
-              if (line ~ "^##[[:space:]]*\\[" ver "\\]") { found=1; next }
-              if (line ~ "^##[[:space:]]*" ver "([[:space:]].*)?$") { found=1; next }
-            }
-            found{print}
-          ' CHANGELOG.md > /tmp/notes.md
-
-          if [ ! -s /tmp/notes.md ]; then
-            echo "body=*No changelog section for ${VER}*" >> $GITHUB_OUTPUT
+          TAG="${GITHUB_REF_NAME}"   # v2.x.y
+          VER="${TAG#v}"             # 2.x.y
+          if [ -f CHANGELOG.md ]; then
+            awk -v ver="$VER" '
+              BEGIN{found=0}
+              /^##[[:space:]]*(\[?)[0-9]/{ 
+                if(found) exit
+                line=$0
+                gsub(/\r/,"",line)
+                if (line ~ "^##[[:space:]]*\\[" ver "\\]") { found=1; next }
+                if (line ~ "^##[[:space:]]*" ver "([[:space:]].*)?$") { found=1; next }
+              }
+              found{print}
+            ' CHANGELOG.md > /tmp/notes.md
+            if [ -s /tmp/notes.md ]; then
+              {
+                printf "## %s\n\n" "$TAG"
+                cat /tmp/notes.md
+              } > /tmp/body.md
+            else
+              echo "*No changelog section for ${VER}*" > /tmp/body.md
+            fi
           else
-            {
-              printf "## %s\n\n" "$TAG"
-              cat /tmp/notes.md
-            } > /tmp/body.md
-
-            body="$(cat /tmp/body.md)"
-            body="${body//'%'/'%25'}"
-            body="${body//$'\n'/'%0A'}"
-            body="${body//$'\r'/'%0D'}"
-            echo "body=$body" >> $GITHUB_OUTPUT
+            echo "*No CHANGELOG.md found*" > /tmp/body.md
           fi
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: build/critical-event-logger.zip
-          body: ${{ steps.notes.outputs.body }}
+          body_path: /tmp/body.md   # ✅ без будь-якого %кодування
           token: ${{ secrets.GITHUB_TOKEN }}

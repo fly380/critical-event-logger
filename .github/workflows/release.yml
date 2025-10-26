@@ -2,8 +2,7 @@ name: Build & Release ZIP
 
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ['v*']
   workflow_dispatch:
 
 permissions:
@@ -31,7 +30,7 @@ jobs:
             composer install --no-dev --prefer-dist --no-interaction
           fi
 
-      # ✅ Копіюємо в build/ критично потрібні файли, ВИКЛЮЧАЮЧИ зайве
+      # ✅ Копіюємо тільки потрібне у ZIP
       - name: Prepare build folder (rsync with excludes)
         run: |
           mkdir -p build/critical-event-logger
@@ -46,15 +45,59 @@ jobs:
             --exclude '/composer.json' \
             --exclude '/composer.lock' \
             --exclude '/README' \
-            --exclude '/README.md'
+            --exclude '/README.md' \
+            --exclude '/readme.txt' \
+            --exclude '/CHANGELOG.md' \
+            --exclude '/docs/'
 
       - name: Create zip
         working-directory: build
         run: |
           zip -r critical-event-logger.zip critical-event-logger
 
+      # 🆕 Витягнути релізні нотатки з CHANGELOG.md для поточного тега
+      - name: Extract changelog section
+        id: notes
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"        # v2.1.2
+          VER="${TAG#v}"                  # 2.1.2
+          if [ ! -f CHANGELOG.md ]; then
+            echo "body=*No CHANGELOG.md found*" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          # Вирізаємо секцію для версії
+          awk -v ver="$VER" '
+            BEGIN{found=0}
+            # Початок секції: "## [2.1.2]" або "## 2.1.2"
+            /^##[[:space:]]*(\[?)[0-9]/{ 
+              if(found) exit
+              line=$0
+              gsub(/\r/,"",line)
+              if (line ~ "^##[[:space:]]*\\[" ver "\\]") { found=1; next }
+              if (line ~ "^##[[:space:]]*" ver "([[:space:]].*)?$") { found=1; next }
+            }
+            found{print}
+          ' CHANGELOG.md > /tmp/notes.md
+
+          if [ ! -s /tmp/notes.md ]; then
+            echo "body=*No changelog section for ${VER}*" >> $GITHUB_OUTPUT
+          else
+            {
+              printf "## %s\n\n" "$TAG"
+              cat /tmp/notes.md
+            } > /tmp/body.md
+
+            body="$(cat /tmp/body.md)"
+            body="${body//'%'/'%25'}"
+            body="${body//$'\n'/'%0A'}"
+            body="${body//$'\r'/'%0D'}"
+            echo "body=$body" >> $GITHUB_OUTPUT
+          fi
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: build/critical-event-logger.zip
+          body: ${{ steps.notes.outputs.body }}
           token: ${{ secrets.GITHUB_TOKEN }}

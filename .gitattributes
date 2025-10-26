@@ -12,5 +12,6 @@ tests/             export-ignore
 composer.lock      export-ignore
 README.md          export-ignore
 composer.json      export-ignore
-readme.txt      export-ignore
-CHANGELOG.md      export-ignore
+readme.txt         export-ignore
+CHANGELOG.md       export-ignore
+docs/              export-ignore

@@ -17,7 +17,6 @@
  * Domain Path: /languages
  * Copyright © 2025 Казмірчук Андрій
  */
-
 if ( is_admin() ) {
 	// Підключаємо PUC (Composer або локальна папка)
 	if ( file_exists( __DIR__ . '/vendor/autoload.php' ) ) {
@@ -28,11 +27,26 @@ if ( is_admin() ) {
 
 	if ( class_exists(\YahnisElsts\PluginUpdateChecker\v5\PucFactory::class) ) {
 		$updateChecker = \YahnisElsts\PluginUpdateChecker\v5\PucFactory::buildUpdateChecker(
-			'https://github.com/fly380/critical-event-logger',
-			__FILE__,
-			'critical-event-logger'
+			'https://github.com/fly380/critical-event-logger', // репозиторій GitHub
+			__FILE__,                                          // головний файл плагіна
+			'critical-event-logger'                            // slug плагіна
 		);
-		$updateChecker->getVcsApi()->enableReleaseAssets();
+
+		// ✅ Опційна автентифікація до GitHub, щоб уникнути 403 (rate limit).
+		// Можеш задати define('CRIT_GITHUB_TOKEN','ghp_xxx') у wp-config.php
+		// або зберігати токен в опції 'crit_github_token'.
+		$ghToken = defined('CRIT_GITHUB_TOKEN') ? CRIT_GITHUB_TOKEN : ( get_option('crit_github_token') ?: '' );
+		if ( is_string($ghToken) && $ghToken !== '' ) {
+			$updateChecker->setAuthentication( trim($ghToken) );
+		}
+
+		// ✅ Безпечний виклик release assets
+		$api = $updateChecker->getVcsApi();
+		if ( $api && method_exists($api, 'enableReleaseAssets') ) {
+			$api->enableReleaseAssets();
+		}
+
+		// Відстежуємо гілку
 		$updateChecker->setBranch('main');
 
 		// ---- Локальні іконки/банери ----
@@ -74,6 +88,142 @@ if ( is_admin() ) {
 		});
 	}
 }
+
+
+/**
+ * Будує HTML changelog із джерел у такому порядку:
+ * 1) CHANGELOG.md (Markdown → HTML)
+ * 2) Секція "== Changelog ==" у readme.txt (WP-readme → HTML)
+ * 3) Тіло останнього релізу GitHub (Markdown → HTML; якщо url-encoded — розкодуємо)
+ */
+function crit_build_changelog_html_from_repo($updateChecker) {
+	$api = $updateChecker->getVcsApi();
+	if (!$api) return '';
+
+	// 1) CHANGELOG.md
+	$md = $api->getRemoteFile('CHANGELOG.md');
+	if (is_string($md) && trim($md) !== '') {
+		return crit_md_to_html_tiny($md);
+	}
+
+	// 2) readme.txt → секція "Changelog"
+	$readme = $api->getRemoteFile('readme.txt');
+	if (is_string($readme) && trim($readme) !== '') {
+		$section = crit_readme_extract_changelog_section($readme);
+		if ($section !== '') {
+			return crit_wp_readme_to_html($section);
+		}
+	}
+
+	// 3) GitHub Release body
+	try {
+		if (method_exists($api, 'getLatestRelease')) {
+			$rel = $api->getLatestRelease(); // масив або null
+			if (is_array($rel) && !empty($rel['body'])) {
+				$body = $rel['body'];
+				if (strpos($body, '%0A') !== false || strpos($body, '%') !== false) {
+					// Буває url-encoded – розкодовуємо акуратно
+					$decoded = @rawurldecode($body);
+					if (is_string($decoded) && $decoded !== '') { $body = $decoded; }
+				}
+				return crit_md_to_html_tiny($body);
+			}
+		}
+	} catch (\Throwable $e) {
+		// тихо ігноруємо
+	}
+
+	return '';
+}
+
+/**
+ * Дуже легкий Markdown→HTML: H1/H2/H3, списки, параграфи.
+ * Додатково: ігноруємо H1 "# Changelog" аби не створював великий верхній відступ.
+ */
+function crit_md_to_html_tiny($md) {
+	$md = ltrim(preg_replace("/\r\n?/", "\n", (string)$md)); // ltrim — зрізає верхні порожні рядки/BOM
+	$lines = explode("\n", $md);
+	$html = '';
+	$inList = false;
+
+	foreach ($lines as $line) {
+		$t = rtrim($line);
+
+		// Ігноруємо H1 "Changelog", щоб не плодити зайвий відступ у модалці
+		if (preg_match('/^#\s*changelog\s*$/ui', $t)) {
+			continue;
+		}
+
+		if ($t === '') {
+			if ($inList) { $html .= "</ul>\n"; $inList = false; }
+			continue;
+		}
+		if (preg_match('/^###\s*(.+)$/u', $t, $m)) {
+			if ($inList) { $html .= "</ul>\n"; $inList = false; }
+			$html .= '<h3>' . esc_html($m[1]) . "</h3>\n";
+			continue;
+		}
+		if (preg_match('/^##\s*(.+)$/u', $t, $m)) {
+			if ($inList) { $html .= "</ul>\n"; $inList = false; }
+			$html .= '<h2>' . esc_html($m[1]) . "</h2>\n";
+			continue;
+		}
+		if (preg_match('/^#\s*(.+)$/u', $t, $m)) { // Якщо все ж є H1 — відобразимо компактно
+			if ($inList) { $html .= "</ul>\n"; $inList = false; }
+			$html .= '<h2>' . esc_html($m[1]) . "</h2>\n";
+			continue;
+		}
+		if (preg_match('/^\s*[-*]\s+(.+)$/u', $t, $m)) {
+			if (!$inList) { $html .= "<ul>\n"; $inList = true; }
+			$html .= '<li>' . esc_html($m[1]) . "</li>\n";
+			continue;
+		}
+		$html .= '<p>' . esc_html($t) . "</p>\n";
+	}
+
+	if ($inList) { $html .= "</ul>\n"; }
+	// Ще раз підчистимо верхні пустоти що могли прослизнути
+	$html = preg_replace('~^(?:\s|<p>\s*&nbsp;\s*</p>)+~i', '', $html);
+	return trim($html);
+}
+
+/**
+ * Витягає секцію "== Changelog ==" із readme.txt (WP-формат).
+ */
+function crit_readme_extract_changelog_section($readmeTxt) {
+	if (!is_string($readmeTxt) || $readmeTxt === '') return '';
+	if (!preg_match('~==\s*Changelog\s*==\s*(.+)$~is', $readmeTxt, $m)) return '';
+	$sec = $m[1];
+	// усе до наступної секції верхнього рівня "== ... =="
+	$parts = preg_split('~\n==\s*[^\n]+==~', $sec, 2);
+	return trim($parts[0] ?? '');
+}
+
+/**
+ * Примітивний конвертер WP-readme секції у HTML (заголовки = ... =, жирний, списки).
+ */
+function crit_wp_readme_to_html($section) {
+	$txt = str_replace(["\r\n", "\r"], "\n", (string)$section);
+	// = 2.1.2 = → <h2>..., **text** → <strong>...</strong>
+	$txt = preg_replace_callback('~^\s*=\s*(.+?)\s*=\s*$~m', function($m){ return "\n<h2>" . esc_html($m[1]) . "</h2>\n"; }, $txt);
+	$txt = preg_replace('~\*\*(.+?)\*\*~s', '<strong>$1</strong>', $txt);
+
+	$lines = explode("\n", $txt);
+	$html = ''; $inList = false;
+	foreach ($lines as $line) {
+		if (preg_match('~^\s*[\*\-]\s+(.+)$~', $line, $m)) {
+			if (!$inList) { $html .= "<ul>\n"; $inList = true; }
+			$html .= '<li>' . esc_html($m[1]) . "</li>\n";
+		} else {
+			if ($inList) { $html .= "</ul>\n"; $inList = false; }
+			if (trim($line) !== '') { $html .= '<p>' . esc_html($line) . "</p>\n"; }
+		}
+	}
+	if ($inList) { $html .= "</ul>\n"; }
+
+	return trim($html);
+}
+
 
 /* Підключаємо основні файли плагіна */
 require_once plugin_dir_path(__FILE__) . 'logger.php';

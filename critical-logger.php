@@ -27,68 +27,106 @@ if ( is_admin() ) {
 
 	if ( class_exists(\YahnisElsts\PluginUpdateChecker\v5\PucFactory::class) ) {
 		$updateChecker = \YahnisElsts\PluginUpdateChecker\v5\PucFactory::buildUpdateChecker(
-			'https://github.com/fly380/critical-event-logger', // репозиторій GitHub
-			__FILE__,                                          // головний файл плагіна
-			'critical-event-logger'                            // slug плагіна
+			'https://github.com/fly380/critical-event-logger',
+			__FILE__,
+			'critical-event-logger'
 		);
 
-		// ✅ Опційна автентифікація до GitHub, щоб уникнути 403 (rate limit).
-		// Можеш задати define('CRIT_GITHUB_TOKEN','ghp_xxx') у wp-config.php
-		// або зберігати токен в опції 'crit_github_token'.
+		// (опційно) токен GitHub, щоб не впиратись у rate limit
 		$ghToken = defined('CRIT_GITHUB_TOKEN') ? CRIT_GITHUB_TOKEN : ( get_option('crit_github_token') ?: '' );
-		if ( is_string($ghToken) && $ghToken !== '' ) {
-			$updateChecker->setAuthentication( trim($ghToken) );
-		}
+		if ( $ghToken ) $updateChecker->setAuthentication( trim($ghToken) );
 
-		// ✅ Безпечний виклик release assets
 		$api = $updateChecker->getVcsApi();
-		if ( $api && method_exists($api, 'enableReleaseAssets') ) {
-			$api->enableReleaseAssets();
-		}
-
-		// Відстежуємо гілку
+		if ( $api && method_exists($api, 'enableReleaseAssets') ) $api->enableReleaseAssets();
 		$updateChecker->setBranch('main');
 
 		// ---- Локальні іконки/банери ----
 		$assetsUrl  = plugin_dir_url(__FILE__)  . 'assets/';
 		$assetsPath = plugin_dir_path(__FILE__) . 'assets/';
-
 		$icons = [];
 		if ( file_exists($assetsPath . 'icon-128x128.png') ) { $icons['1x'] = $assetsUrl . 'icon-128x128.png'; }
 		if ( file_exists($assetsPath . 'icon-256x256.png') ) { $icons['2x'] = $assetsUrl . 'icon-256x256.png'; }
-
 		$banners = [];
 		if ( file_exists($assetsPath . 'banner-772x250.png') )  { $banners['low']  = $assetsUrl . 'banner-772x250.png'; }
 		if ( file_exists($assetsPath . 'banner-1544x500.png') ) { $banners['high'] = $assetsUrl . 'banner-1544x500.png'; }
 
-		// 1) Модалка "Переглянути деталі версії"
-		$updateChecker->addResultFilter(function($info) use ($icons, $banners) {
-			if (!empty($icons))   { $info->icons   = array_merge((array)($info->icons ?? []),   $icons); }
-			if (!empty($banners)) { $info->banners = array_merge((array)($info->banners ?? []), $banners); }
+		// 1) Модалка «Деталі версії»: додаємо лише іконки + підміняємо changelog; банер — вимикаємо
+		$updateChecker->addResultFilter(function($info) use ($icons, $updateChecker) {
+			if (!empty($icons)) { // іконки можна лишати — вони не дають великого відступу
+				$info->icons = array_merge((array)($info->icons ?? []), $icons);
+			}
+
+			// ВАЖЛИВО: банер забираємо, щоб не було 250px зверху
+			if ( isset($info->banners) ) {
+				$info->banners = [];
+			}
+
+			// Акуратний changelog
+			$html = crit_build_clean_changelog_html($updateChecker);
+			if ($html !== '') {
+				$html = preg_replace('~^\xEF\xBB\xBF|\A\s+~u', '', $html); // прибрати BOM/початкові пробіли
+				$html = preg_replace('~^(?:<p>(?:&nbsp;|\s|<br\s*/?>)*</p>\s*)+~i', '', $html); // порожні <p> на початку
+				$info->sections = is_array($info->sections) ? $info->sections : [];
+				$info->sections['changelog'] = $html;
+			}
 			return $info;
 		});
 
-		// 2) Рядок оновлення у списку плагінів
-		$updateChecker->addFilter('pre_inject_update', function($update) use ($icons, $banners) {
-			if ($update) {
-				if (!empty($icons))   { $update->icons   = $icons; }
-				if (!empty($banners)) { $update->banners = $banners; }
+		// 2) У рядку зі списку плагінів банер нам не потрібен, залишимо як є
+		$updateChecker->addFilter('pre_inject_update', function($update) use ($icons /*, $banners */) {
+			if ($update && !empty($icons)) {
+				$update->icons = $icons;
 			}
+			// $update->banners НЕ чіпаємо
 			return $update;
 		});
 
-		// 3) Підстраховка: доклеїти у transient, якщо щось перетреться
-		add_filter('site_transient_update_plugins', function($transient) use ($icons, $banners) {
+		add_filter('site_transient_update_plugins', function($transient) use ($icons /*, $banners */) {
 			$pluginFile = plugin_basename(__FILE__);
 			if ( isset($transient->response[$pluginFile]) ) {
-				if (!empty($icons)   && empty($transient->response[$pluginFile]->icons))   { $transient->response[$pluginFile]->icons   = $icons; }
-				if (!empty($banners) && empty($transient->response[$pluginFile]->banners)) { $transient->response[$pluginFile]->banners = $banners; }
+				if (!empty($icons) && empty($transient->response[$pluginFile]->icons)) {
+					$transient->response[$pluginFile]->icons = $icons;
+				}
 			}
 			return $transient;
 		});
 	}
 }
-
+// Прибрати великий верхній відступ у вкладці "Список змін" (thickbox)
+add_action('admin_head', function () {
+	?>
+	<style id="crit-changelog-gap-fix">
+		/* забираємо верхній падінг і margin першого елемента */
+		#TB_window #section-changelog{padding-top:0 !important;}
+		#TB_window #section-changelog > :first-child{margin-top:0 !important;}
+		#TB_window #section-changelog h1:first-child,
+		#TB_window #section-changelog h2:first-child,
+		#TB_window #section-changelog h3:first-child,
+		#TB_window #section-changelog p:first-child,
+		#TB_window #section-changelog ul:first-child{margin-top:0 !important;}
+		/* якщо WordPress підкинув порожні параграфи — не показуємо їх */
+		#TB_window #section-changelog p:empty{display:none;}
+	</style>
+	<script>
+		// На відкриття модалки прибираємо leading-<p> з &nbsp;/<br>
+		jQuery(function($){
+			$(document).on('tb_show', function(){
+				var $p = $('#TB_window #section-changelog');
+				if(!$p.length) return;
+				$p.children('p').each(function(){
+					var html = $(this).html();
+					// знищуємо перші порожні параграфи
+					if ( html && html.replace(/(?:&nbsp;|<br\s*\/?>|\s)+/gi,'') === '' ) {
+						$(this).remove();
+					} else {
+						return false; // зупинитись на першому непорожньому
+					}
+				});
+			});
+		});
+	</script>
+	<?php
+});
 
 /**
  * Будує HTML changelog із джерел у такому порядку:

@@ -164,6 +164,136 @@ if (!function_exists('crit_log_time')) {
 	}
 }
 
+// === BOT DETECTION HELPERS ===
+if (!function_exists('crit_bot_match_ua')) {
+	function crit_bot_match_ua(string $ua): ?array {
+		$ua_l = strtolower($ua);
+
+		$patterns = [
+			'Googlebot'      => 'googlebot|adsbot-google|apis-google|mediapartners-google|feedfetcher-google|duplexweb-google',
+			'Bingbot'        => 'bingbot|adidxbot|msnbot',
+			'DuckDuckBot'    => 'duckduckbot|duckduckgo',
+			'Baidu'          => 'baiduspider',
+			'Yandex'         => 'yandex(bot|images|media|mobile|news|video|image|accessibility|metrika)',
+			'Applebot'       => 'applebot',
+			'PetalBot'       => 'petalbot',
+			'AhrefsBot'      => 'ahrefsbot',
+			'SemrushBot'     => 'semrush(bot)?',
+			'DotBot'         => 'dotbot',
+			'MJ12bot'        => 'mj12bot',
+			'Sogou'          => 'sogou',
+			'Exabot'         => 'exabot',
+			'SeznamBot'      => 'seznambot',
+			'Qwantify'       => 'qwantify',
+			'CCBot'          => 'ccbot|commoncrawl',
+			'Bytespider'     => 'bytespider',
+			// AI/ресерч краулери
+			'GPTBot'         => 'gptbot|chatgpt-user',
+			'ClaudeBot'      => 'claudebot|anthropic-ai',
+			'PerplexityBot'  => 'perplexitybot',
+			'PhindBot'       => 'phindbot',
+			'Omgili'         => 'omgili|omgilibot',
+			// Соціальні/прев’ю
+			'Facebook'       => 'facebookexternalhit|facebot',
+			'Twitter'        => 'twitterbot',
+			'LinkedIn'       => 'linkedinbot',
+			'Slack'          => 'slackbot',
+			'Telegram'       => 'telegrambot',
+			'Discord'        => 'discordbot',
+			'WhatsApp'       => 'whatsapp',
+			'Pinterest'      => 'pinterestbot',
+			// Headless / інструменти / скрейпери / бібліотеки
+			'Headless'       => 'headlesschrome|puppeteer|playwright|phantomjs|lighthouse|pagespeed',
+			'Libraries'      => 'curl|wget|python-requests|go-http-client|libwww-perl|okhttp|aiohttp|httpx|httpclient|java|scrapy|guzzlehttp',
+			// Моніторинги/аптайм
+			'Monitor'        => 'uptimerobot|pingdom|statuscake|newrelicpinger|datadog|nagios|zabbix|site24x7',
+		];
+
+		foreach ($patterns as $name => $re) {
+			if (preg_match('~(?:' . $re . ')~i', $ua)) {
+				return ['name' => $name, 'generic' => false];
+			}
+		}
+
+		// fallback: загальні індикатори
+		if (preg_match('~\b(bot|spider|crawler|fetcher|analyz|scrap|preview|transcoder)\b~i', $ua)) {
+			return ['name' => 'GenericBot', 'generic' => true];
+		}
+		return null;
+	}
+}
+
+if (!function_exists('crit_verify_search_engine_bot')) {
+	function crit_verify_search_engine_bot(string $ip, string $botName): string {
+		$botName = strtolower($botName);
+		$host = @gethostbyaddr($ip);
+		if (!$host || $host === $ip) return 'na';
+
+		$okSuffix = null;
+		if ($botName === 'googlebot')          $okSuffix = '.googlebot.com';
+		elseif ($botName === 'bingbot')        $okSuffix = '.search.msn.com';
+		elseif ($botName === 'yandex')         $okSuffix = '.yandex.ru|.yandex.net';
+		elseif ($botName === 'baidu')          $okSuffix = '.baidu.com';
+		elseif ($botName === 'duckduckbot')    $okSuffix = '.duckduckgo.com';
+		elseif ($botName === 'applebot')       $okSuffix = '.applebot.apple.com';
+
+		if (!$okSuffix) return 'na';
+
+		$ok = false;
+		foreach (explode('|', $okSuffix) as $suf) {
+			if (substr($host, -strlen($suf)) === $suf) { $ok = true; break; }
+		}
+		if (!$ok) return 'bad';
+
+		// forward-confirm
+		$ip2 = @gethostbyname($host);
+		return ($ip2 === $ip) ? 'ok' : 'bad';
+	}
+}
+
+if (!function_exists('crit_capture_client_ua')) {
+	function crit_capture_client_ua(): void {
+		$ua = $_SERVER['HTTP_USER_AGENT'] ?? '';
+		if ($ua === '') return;
+
+		$ip = function_exists('crit_client_ip')
+			? crit_client_ip()
+			: ($_SERVER['REMOTE_ADDR'] ?? '');
+		if ($ip === '') return;
+
+		$match = crit_bot_match_ua($ua);
+		$bot   = $match ? $match['name'] : '';
+		$ver   = 'na';
+
+		if ($bot) {
+			// verify тільки для «великих» пошуковиків
+			$core = ['googlebot','bingbot','yandex','baidu','duckduckbot','applebot'];
+			if (in_array(strtolower($bot), $core, true)) {
+				$ver = crit_verify_search_engine_bot($ip, $bot);
+			}
+		}
+
+		$data = [
+			'ua'  => $ua,
+			'bot' => $bot,
+			'ver' => $ver,
+			'ts'  => time(),
+		];
+		set_transient('crit_ua_' . md5($ip), $data, 12 * HOUR_IN_SECONDS);
+
+		// ── ДОДАНО: маркер у лог про виявленого бота ──
+		if (!empty($bot) && function_exists('crit_log_time')) {
+			$log_file = crit_log_file();
+			if ($log_file) {
+				$msg = '[' . crit_log_time() . '][' . $ip . '][guest][INFO] BOT DETECTED: ' . $bot . '; UA=' . substr($ua, 0, 180);
+				crit_append_log_line($log_file, $msg);
+			}
+		}
+	}
+	add_action('init', 'crit_capture_client_ua', 1);
+}
+
+
 /**
  * Акуратно дописує рядок у лог: гарантує перенос перед новим записом і додає \n в кінці
  * $line очікується БЕЗ \n в кінці.
@@ -297,7 +427,6 @@ function critical_logger_detected_ips_cb() {
 	$log_file = crit_log_file();
 	if (! file_exists($log_file)) wp_send_json_error('Лог-файл не знайдено', 404);
 
-	// Беремо тільки останні N записів для швидкості (можеш підкрутити за необхідності)
 	$entries   = crit_tail_entries($log_file, 2000);
 	$ip_counts = [];
 	foreach ($entries as $ln) {
@@ -311,29 +440,29 @@ function critical_logger_detected_ips_cb() {
 	if ($ip_counts) {
 		echo '<table class="widefat striped" style="width:100%;">';
 		echo '<thead><tr>
-				<th>IP</th>
-				<th>Кількість</th>
-				<th>Пул</th>
-				<th>Гео</th>
-				<th>Дія</th>
-			</tr></thead><tbody>';
+			<th>IP</th>
+			<th>Пул</th>
+			<th>Гео</th>
+			<th>Дія</th>
+		</tr></thead><tbody>';
 
 		foreach ($ip_counts as $fip => $cnt) {
-			$style = crit_heat_style_from_count((int)$cnt);
+			$style = crit_heat_style_from_count((int)$cnt); // лишаємо підсвітку за частотою
 
 			echo '<tr>';
 			echo '<td style="' . esc_attr($style) . '">' . esc_html($fip) . '</td>';
-			echo '<td>' . intval($cnt) . '</td>';
 			echo '<td class="crit-pool" data-ip="' . esc_attr($fip) . '"><em style="color:#888">…</em></td>';
 			echo '<td class="crit-geo" data-ip="' . esc_attr($fip) . '"><em style="color:#888">…</em></td>';
 			echo '<td>';
 
+			// Кнопка "Блокувати IP"
 			echo '<form method="post" style="display:inline; margin-right:4px;">' .
 				 wp_nonce_field('manual_block_ip_action', 'manual_block_ip_nonce', true, false) .
 				 '<input type="hidden" name="manual_ip_address" value="' . esc_attr($fip) . '">' .
 				 '<input type="submit" name="manual_block_ip" class="button button-small" value="Блокувати">' .
 			'</form>';
 
+			// Кнопка "Блокувати пул" (значення підставить AJAX після geo/pool lookup)
 			echo '<form method="post" class="js-block-pool-form" data-ip="' . esc_attr($fip) . '" style="display:inline;">' .
 				 wp_nonce_field('manual_block_ip_action', 'manual_block_ip_nonce', true, false) .
 				 '<input type="hidden" name="manual_ip_address" class="js-pool-input" value="">' .
@@ -437,7 +566,16 @@ function critical_logger_log_table_cb() {
 			$username_out = $username;
 			$message_out  = $message;
 		}
-
+		if (!empty($ip)) {
+			$ua_cache = get_transient('crit_ua_' . md5($ip));
+		if (is_array($ua_cache) && !empty($ua_cache['bot'])) {
+			$bot_label = strtolower((string)$ua_cache['bot']);
+			// щоб не дублювати, якщо вже є "(bingbot)" тощо
+        if (stripos($message_out, '(' . $bot_label . ')') === false) {
+            $message_out .= ' (' . $bot_label . ')';
+			}
+		}
+	}
 		$style = '';
 		if (!empty($ip)) {
 			$style = crit_heat_style_from_count((int) ($ip_counts[$ip] ?? 0));

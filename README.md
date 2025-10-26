@@ -171,3 +171,234 @@ License URI: https://www.gnu.org/licenses/gpl-2.0.html
 ```
 
 Цей плагін поширюється під ліцензією **GPL v2 або пізнішою**. Див. файл LICENSE або посилання вище.
+
+---
+
+## Додатки
+
+### Архітектурна схема
+
+```mermaid
+%% Critical Event Logger — Interaction Diagram (Mermaid)
+flowchart TD
+    A[WP core & plugins
+hooks/events] --> B(logger-hooks.php)
+    B --> C{critical_logger_log()}
+    C --> D[logger.php
+write with LOCK_EX]
+    D -->|append| E[events.log
+uploads/critical-event-logger/logs]
+    subgraph Admin UI
+        F[critical-logger.php
+admin pages + AJAX]
+        F --> G[View Logs
+AJAX tail + filters]
+        F --> H[Intelligence
+AbuseIPDB/VT/Spamhaus]
+        F --> I[GeoBlock settings]
+        F --> J[Rotation settings]
+        F --> K[.htaccess Blocklist UI]
+        F --> L[API Keys]
+    end
+    E --> G
+    subgraph Runtime Guards
+        M[geoblock.php
+init early]
+        N[.htaccess
+Apache only]
+        O[Nginx location deny]
+    end
+    M -->|allow/deny| P{Request}
+    P -->|deny| Q[403/blank/json + log]
+    P -->|allow| R[WP continues]
+    subgraph Rotation
+        S[WP-Cron daily]
+        S --> T[rotation.php
+size/time policy]
+        T --> U[events-YYYYmmdd-HHMMSS.log]
+        T --> V[prune old entries]
+    end
+```
+
+### Швидкий чекліст налаштування
+
+# Critical Event Logger — Швидкий чекліст налаштування
+
+1) **Захист каталогу логів**
+   - [ ] Додано Nginx `location` deny або Apache `<Directory> Require all denied`.
+   - [ ] `curl -I https://site/wp-content/uploads/critical-event-logger/logs/events.log` → 403/404.
+
+2) **Права й користувачі**
+   - [ ] Власник каталогу логів — веб-користувач (www-data/nginx).
+   - [ ] Права: папки `750`, файли `640`.
+
+3) **Ротація**
+   - [ ] Макс. розмір 10–20 МБ, архіви 7–14, вік 30–90 днів.
+   - [ ] Перевірено створення архівів та видалення старих.
+
+4) **GeoBlock**
+   - [ ] Спершу режим Preview.
+   - [ ] Додані винятки (офісні CIDR, VPN, CDN).
+   - [ ] Кеш 30–60 хв.
+
+5) **Proxy / Real IP**
+   - [ ] Налаштовано відновлення реальної IP на сервері (CF/Nginx).
+   - [ ] `CRIT_TRUST_PROXY` увімкнено лише за довіреного проксі.
+
+6) **Інтел/AI (опційно)**
+   - [ ] Додано ключі AbuseIPDB / VirusTotal / OpenAI.
+   - [ ] Виставлено адекватні таймаути і TTL кешів.
+
+7) **CRON**
+   - [ ] Налаштований системний cron для WP-Cron (*/15).
+
+8) **Експлуатація**
+   - [ ] Щоденні перегляди логів і підозрілих IP.
+   - [ ] Щотижневий перегляд ротації та блок-листа.
+   - [ ] Щомісячна перевірка deny-правил після апдейтів/міграцій.
+
+### Ops README (розгорнутий гайд з експлуатації)
+
+# Critical Event Logger — Ops README
+
+Цей документ допоможе швидко і безпечно розгорнути та експлуатувати плагін **Critical Event Logger** для WordPress.
+
+## Що робить плагін
+- Журналює критичні та адміністративні події WordPress у файл.
+- Показує логи в адмінці (AJAX-перезавантаження, фільтри, пошук).
+- Ротує й архівує журнали за розміром/часом.
+- Має GeoBlock за країною з «консенсусом» кількох джерел.
+- Дозволяє керувати блок-листом IP у `.htaccess` (Apache 2.2/2.4).
+- Робить базовий IP-інтел (AbuseIPDB, VirusTotal, Spamhaus) із кешуванням.
+- (Опційно) Формує AI-огляд по логах (ключ OpenAI).
+- Підтримує автооновлення з GitHub (PUC).
+
+## Де та як зберігаються дані
+- Основний журнал: `wp-content/uploads/critical-event-logger/logs/events.log`
+- Архіви: `wp-content/uploads/critical-event-logger/logs/events-YYYYmmdd-HHMMSS.log`
+- Кеші/сервісні файли — у транзієнтах WP та службових підпапках uploads.
+
+> **Важливо:** `.htaccess` у каталозі логів **не працює** на Nginx. Обовʼязково закрийте доступ сервером (див. «Захист директорії логів»). Маскування PII діє тільки при відображенні в адмінці — у файлі лога зберігається «сирий» текст.
+
+## Вимоги (рекомендації)
+- WordPress 6.x+, PHP 7.4+ або 8.x.
+- Модуль cURL або дозволений `WP_Http` для зовнішніх запитів (Geo/IP/інтел/AI).
+- Права на запис у `wp-content/uploads` для веб-користувача.
+
+## Встановлення
+1. Завантажте плагін у директорію `wp-content/plugins/` та активуйте в адмінці.
+2. Після активації плагін створить каталог логів і службові файли (`.htaccess`, `index.php`).
+3. Перейдіть у **Адмінка → Інструменти → Critical Event Logger** (назви пунктів можуть відрізнятися) та налаштуйте:
+   - **View Logs** — перегляд/фільтрація лога.
+   - **Rotation** — ліміти розміру/кількості/віку логів.
+   - **GeoBlock** — країни-блок, винятки, режим (preview/блок).
+   - **Intelligence** — ключі AbuseIPDB/VirusTotal, TTL кешів.
+   - **.htaccess Blocklist** — додавання/видалення IP/CIDR/діапазонів.
+   - **API Keys** — збереження/очищення ключів сервісів та OpenAI (за потреби).
+
+## Захист директорії логів (обовʼязково)
+### Nginx
+```nginx
+# Блокує будь-який доступ до каталогу плагіна
+location ^~ /wp-content/uploads/critical-event-logger/ {
+    deny all;
+    return 404;
+}
+```
+
+### Apache (якщо керуєте віртуальним хостом, не .htaccess)
+```apache
+<Directory "/var/www/html/wp-content/uploads/critical-event-logger">
+    Require all denied
+</Directory>
+```
+
+> `.htaccess` у папці логів додається плагіном автоматично, але покладайтеся на серверні правила, якщо у вас Nginx або змішане оточення.
+
+## Налаштування CRON
+Плагін використовує WP-Cron. Для надійності бажано запускати WP-Cron системним планувальником:
+
+```cron
+*/15 * * * * cd /path/to/wordpress && wp cron event run --due-now >/dev/null 2>&1
+```
+
+## Рекомендовані значення ротації
+- **Макс. розмір лога:** 10–20 МБ
+- **Кількість архівів:** 7–14
+- **Макс. вік записів:** 30–90 днів
+
+## GeoBlock — поради
+- Спочатку увімкніть **Preview**, щоб перевірити фальшпозитиви.
+- Додайте винятки для власної країни та службових CIDR (офіс/VPN/CDN).
+- Кеш 30–60 хв оптимальний; покладайтесь на заголовки CDN (Cloudflare) за наявності.
+
+## Проксі та реальна IP-адреса
+Якщо сайт за довіреним проксі/CDN, увімкніть довіру до заголовків у `wp-config.php` **лише якщо ви впевнені** у ланцюжку проксі:
+```php
+define('CRIT_TRUST_PROXY', true);
+```
+Інакше залиште вимкненим, щоб уникнути підміни IP через `X-Forwarded-For`.
+
+## Інтел-аналіз IP
+- **AbuseIPDB / VirusTotal / Spamhaus** — ключі вводяться на сторінці **API Keys**.
+- Дані кешуються (~12 год), щоб не перевищувати ліміти.
+- У звіті підсвічуються ризикові IP; блокуйте точково через `.htaccess Blocklist`.
+
+## Конфіденційність
+- В адмінці можливе маскування PII (email/IP/телефон).
+- У файлі лога зберігаються реальні значення — забезпечте **серверну** заборону доступу та обмежте доступ до файлової системи.
+
+## AI-огляд (опційно)
+- Введіть ключ OpenAI, оберіть компактну модель.
+- Враховуйте вартість і ліміти; тримайте таймаути адекватними до мережі.
+
+## Видалення/очистка
+- На сторінці плагіна є дії для очищення кешів і ключів.
+- `uninstall.php` прибирає опції/крони/кеші/каталог логів (перевірте перед видаленням у продакшені).
+
+## Типові проблеми та рішення
+- **Журнал доступний ззовні (200 OK):** додайте серверні deny-правила (див. вище), перевірте `curl -I https://site/.../events.log` має давати 403/404.
+- **Немає записів / «Permission denied»:** виправте власника каталогу (`www-data`/`nginx`) і права (`750` для папок, `640` для файлів).
+- **Повільні сторінки інтел/AI:** перевірте ключі, ліміти, TTL кешів; тимчасово вимкніть ці модулі.
+- **Неправильні IP за проксі:** налаштуйте відновлення реальної IP на веб-сервері (CF Real IP, `real_ip_header` у Nginx), а `CRIT_TRUST_PROXY` вмикайте лише після цього.
+- **Multisite:** перевірте, де зберігаються логи (на рівні мережі/сайту), узгодьте ролі супер-адмінів.
+
+## Операційний «runbook»
+**Щодня:**
+- Перевірте «View Logs», зверніть увагу на повторні 4xx/5xx і «підозрілі» URI.
+- Прогляньте «Detected IPs» і звіт інтел при піках активності.
+
+**Щотижня:**
+- Перегляньте ротацію: архіви створюються, старі видаляються.
+- Оновіть блок-лист .htaccess, заберіть помилкові спрацьовування.
+
+**Щомісяця:**
+- Перевірте deny-правила веб-сервера після оновлень/міграцій.
+- Перегляньте TTL кешів для зовнішніх сервісів, ключі, ліміти та витрати.
+
+
+### Процесна схема (ASCII)
+
+```
+WP Hooks & системні події
+        │
+        ▼
+logger-hooks.php ──> critical_logger_log() ──> logger.php ──> events.log (uploads/.../logs)
+        │                                                ▲
+        │                                                │ LOCK_EX, .htaccess, index.php
+        └──────────► (404/REST/CF7/Woo/updates/etc)
+        
+Адмін-панель
+  critical-logger.php
+    ├─ Меню «Переглянути логи» + AJAX:
+    │    ├─ wp_ajax_critical_logger_log_table → tail логів, фільтри рівнів, PII-маскування (лише в UI)
+    │    ├─ wp_ajax_critical_logger_detected_ips → часті IP + батч-гео/пул
+    │    └─ wp_ajax_critical_logger_reload_logs → швидке оновлення
+    ├─ Submenu:
+    │    ├─ «Інтел-аналіз» → intel-admin.php → AbuseIPDB/VT/Spamhaus (кеш)
+    │    ├─ «GeoBlock» → geoblock.php (ранній init-блокер + налаштування)
+    │    ├─ «Ротація логів» → rotation.php (cron + архіви + політика зберігання)
+    │    ├─ «Заблоковані IP (.htaccess)» → htaccess-blocklist.php
+    │    └─ «API Keys» → seting.php
+    └─ PUC: автооновлення з GitHub + локальні іконки/банери
+```

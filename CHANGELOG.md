@@ -45,5 +45,3 @@
 
 ---
 
-[2.1.2]: https://github.com/fly380/critical-event-logger/releases/tag/2.1.2
-[2.1.1]: https://github.com/fly380/critical-event-logger/releases/tag/2.1.1

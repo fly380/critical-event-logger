@@ -34,37 +34,35 @@ if ( is_admin() ) {
 
 		// (опційно) токен GitHub, щоб не впиратись у rate limit
 		$ghToken = defined('CRIT_GITHUB_TOKEN') ? CRIT_GITHUB_TOKEN : ( get_option('crit_github_token') ?: '' );
-		if ( $ghToken ) $updateChecker->setAuthentication( trim($ghToken) );
+		if ( $ghToken ) {
+			$updateChecker->setAuthentication( trim($ghToken) );
+		}
 
 		$api = $updateChecker->getVcsApi();
-		if ( $api && method_exists($api, 'enableReleaseAssets') ) $api->enableReleaseAssets();
+		if ( $api && method_exists($api, 'enableReleaseAssets') ) {
+			$api->enableReleaseAssets();
+		}
 		$updateChecker->setBranch('main');
 
-		// ---- Локальні іконки/банери ----
+		// ---- Локальні іконки ----
 		$assetsUrl  = plugin_dir_url(__FILE__)  . 'assets/';
 		$assetsPath = plugin_dir_path(__FILE__) . 'assets/';
 		$icons = [];
 		if ( file_exists($assetsPath . 'icon-128x128.png') ) { $icons['1x'] = $assetsUrl . 'icon-128x128.png'; }
 		if ( file_exists($assetsPath . 'icon-256x256.png') ) { $icons['2x'] = $assetsUrl . 'icon-256x256.png'; }
-		$banners = [];
-		if ( file_exists($assetsPath . 'banner-772x250.png') )  { $banners['low']  = $assetsUrl . 'banner-772x250.png'; }
-		if ( file_exists($assetsPath . 'banner-1544x500.png') ) { $banners['high'] = $assetsUrl . 'banner-1544x500.png'; }
 
-		// 1) Модалка «Деталі версії»: додаємо лише іконки + підміняємо changelog; банер — вимикаємо
+		// 1) Модалка «Деталі версії»: додаємо іконки, прибираємо банери, підміняємо changelog
 		$updateChecker->addResultFilter(function($info) use ($icons, $updateChecker) {
-			if (!empty($icons)) { // іконки можна лишати — вони не дають великого відступу
+			if (!empty($icons)) {
 				$info->icons = array_merge((array)($info->icons ?? []), $icons);
 			}
-
-			// ВАЖЛИВО: банер забираємо, щоб не було 250px зверху
-			if ( isset($info->banners) ) {
-				$info->banners = [];
-			}
+			// Прибрати банери (вони дають великий верхній відступ)
+			$info->banners = [];
 
 			// Акуратний changelog
 			$html = crit_build_clean_changelog_html($updateChecker);
 			if ($html !== '') {
-				$html = preg_replace('~^\xEF\xBB\xBF|\A\s+~u', '', $html); // прибрати BOM/початкові пробіли
+				$html = preg_replace('~^\xEF\xBB\xBF|\A\s+~u', '', $html); // BOM/пробіли
 				$html = preg_replace('~^(?:<p>(?:&nbsp;|\s|<br\s*/?>)*</p>\s*)+~i', '', $html); // порожні <p> на початку
 				$info->sections = is_array($info->sections) ? $info->sections : [];
 				$info->sections['changelog'] = $html;
@@ -72,16 +70,16 @@ if ( is_admin() ) {
 			return $info;
 		});
 
-		// 2) У рядку зі списку плагінів банер нам не потрібен, залишимо як є
-		$updateChecker->addFilter('pre_inject_update', function($update) use ($icons /*, $banners */) {
+		// 2) Рядок у списку плагінів — лише іконки
+		$updateChecker->addFilter('pre_inject_update', function($update) use ($icons) {
 			if ($update && !empty($icons)) {
 				$update->icons = $icons;
 			}
-			// $update->banners НЕ чіпаємо
 			return $update;
 		});
 
-		add_filter('site_transient_update_plugins', function($transient) use ($icons /*, $banners */) {
+		// 3) Підстраховка в transient
+		add_filter('site_transient_update_plugins', function($transient) use ($icons) {
 			$pluginFile = plugin_basename(__FILE__);
 			if ( isset($transient->response[$pluginFile]) ) {
 				if (!empty($icons) && empty($transient->response[$pluginFile]->icons)) {
@@ -90,43 +88,155 @@ if ( is_admin() ) {
 			}
 			return $transient;
 		});
+
+		// 4) Фікс відступу у вкладці «Список змін»
+		add_action('admin_head', 'crit_fix_changelog_spacing_css');
+		add_action('admin_print_footer_scripts', 'crit_fix_changelog_spacing_js');
 	}
 }
-// Прибрати великий верхній відступ у вкладці "Список змін" (thickbox)
-add_action('admin_head', function () {
-	?>
-	<style id="crit-changelog-gap-fix">
-		/* забираємо верхній падінг і margin першого елемента */
-		#TB_window #section-changelog{padding-top:0 !important;}
-		#TB_window #section-changelog > :first-child{margin-top:0 !important;}
-		#TB_window #section-changelog h1:first-child,
-		#TB_window #section-changelog h2:first-child,
-		#TB_window #section-changelog h3:first-child,
-		#TB_window #section-changelog p:first-child,
-		#TB_window #section-changelog ul:first-child{margin-top:0 !important;}
-		/* якщо WordPress підкинув порожні параграфи — не показуємо їх */
-		#TB_window #section-changelog p:empty{display:none;}
-	</style>
-	<script>
-		// На відкриття модалки прибираємо leading-<p> з &nbsp;/<br>
-		jQuery(function($){
-			$(document).on('tb_show', function(){
-				var $p = $('#TB_window #section-changelog');
-				if(!$p.length) return;
-				$p.children('p').each(function(){
-					var html = $(this).html();
-					// знищуємо перші порожні параграфи
-					if ( html && html.replace(/(?:&nbsp;|<br\s*\/?>|\s)+/gi,'') === '' ) {
-						$(this).remove();
-					} else {
-						return false; // зупинитись на першому непорожньому
-					}
-				});
-			});
-		});
-	</script>
-	<?php
-});
+
+/** ---------- Helpers ---------- */
+
+/**
+ * Будує «чистий» HTML changelog із джерел у такому порядку:
+ * 1) CHANGELOG.md (Markdown → HTML)
+ * 2) Секція "== Changelog ==" у readme.txt (WP-readme → HTML)
+ * 3) Тіло останнього релізу GitHub (Markdown → HTML)
+ */
+function crit_build_clean_changelog_html($updateChecker) {
+	$api = $updateChecker->getVcsApi();
+	if ( !$api ) return '';
+
+	// 1) CHANGELOG.md
+	$md = $api->getRemoteFile('CHANGELOG.md');
+	if ( is_string($md) && trim($md) !== '' ) {
+		$html = crit_md_to_html_tiny($md);
+		if ( $html !== '' ) return $html;
+	}
+
+	// 2) readme.txt → секція "Changelog"
+	$readme = $api->getRemoteFile('readme.txt');
+	if ( is_string($readme) && trim($readme) !== '' ) {
+		$section = crit_readme_extract_changelog_section($readme);
+		if ( $section !== '' ) {
+			$html = crit_wp_readme_to_html($section);
+			if ( $html !== '' ) return $html;
+		}
+	}
+
+	// 3) GitHub Release body (інколи URL-encoded)
+	try {
+		if ( method_exists($api, 'getLatestRelease') ) {
+			$rel = $api->getLatestRelease();
+			if ( is_array($rel) && !empty($rel['body']) ) {
+				$body = $rel['body'];
+				if ( strpos($body, '%0A') !== false ) {
+					$body = urldecode($body);
+				}
+				return crit_md_to_html_tiny($body);
+			}
+		}
+	} catch (\Throwable $e) {}
+
+	return '';
+}
+
+/**
+ * Дуже легкий Markdown→HTML: H2/H3, списки, параграфи.
+ */
+function crit_md_to_html_tiny($md) {
+	$md = preg_replace("/\r\n?/", "\n", (string)$md);
+	$lines = explode("\n", $md);
+	$html = '';
+	$inList = false;
+
+	foreach ($lines as $line) {
+		$t = rtrim($line);
+
+		if ($t === '') {
+			if ($inList) { $html .= "</ul>\n"; $inList = false; }
+			continue;
+		}
+		if (preg_match('/^###\s*(.+)$/u', $t, $m)) {
+			if ($inList) { $html .= "</ul>\n"; $inList = false; }
+			$html .= '<h3>' . esc_html($m[1]) . "</h3>\n";
+			continue;
+		}
+		if (preg_match('/^##\s*(.+)$/u', $t, $m)) {
+			if ($inList) { $html .= "</ul>\n"; $inList = false; }
+			$html .= '<h2>' . esc_html($m[1]) . "</h2>\n";
+			continue;
+		}
+		if (preg_match('/^\s*[-*]\s+(.+)$/u', $t, $m)) {
+			if (!$inList) { $html .= "<ul>\n"; $inList = true; }
+			$html .= '<li>' . esc_html($m[1]) . "</li>\n";
+			continue;
+		}
+		$html .= '<p>' . esc_html($t) . "</p>\n";
+	}
+
+	if ($inList) { $html .= "</ul>\n"; }
+	return trim($html);
+}
+
+/**
+ * Витягає секцію "== Changelog ==" із readme.txt (WP-формат).
+ */
+function crit_readme_extract_changelog_section($readmeTxt) {
+	if (!is_string($readmeTxt) || $readmeTxt === '') return '';
+	if (!preg_match('~==\s*Changelog\s*==\s*(.+)$~is', $readmeTxt, $m)) return '';
+	$sec = $m[1];
+	// усе до наступної секції верхнього рівня "== ... =="
+	$parts = preg_split('~\n==\s*[^\n]+==~', $sec, 2);
+	return trim($parts[0] ?? '');
+}
+
+/**
+ * Примітивний конвертер WP-readme секції у HTML (заголовки = ... =, **жирний**, списки).
+ */
+function crit_wp_readme_to_html($section) {
+	$txt = str_replace(["\r\n", "\r"], "\n", (string)$section);
+	$txt = preg_replace_callback('~^\s*=\s*(.+?)\s*=\s*$~m', function($m){
+		return "\n<h2>" . esc_html($m[1]) . "</h2>\n";
+	}, $txt);
+	$txt = preg_replace('~\*\*(.+?)\*\*~s', '<strong>$1</strong>', $txt);
+
+	$lines = explode("\n", $txt);
+	$html = ''; $inList = false;
+	foreach ($lines as $line) {
+		if (preg_match('~^\s*[\*\-]\s+(.+)$~', $line, $m)) {
+			if (!$inList) { $html .= "<ul>\n"; $inList = true; }
+			$html .= '<li>' . esc_html($m[1]) . "</li>\n";
+		} else {
+			if ($inList) { $html .= "</ul>\n"; $inList = false; }
+			if (trim($line) !== '') {
+				$html .= '<p>' . $line . "</p>\n";
+			}
+		}
+	}
+	if ($inList) { $html .= "</ul>\n"; }
+	return trim($html);
+}
+
+/** --- CSS/JS-фікс великого відступу у вкладці «Список змін» --- */
+function crit_fix_changelog_spacing_css() {
+	echo '<style id="crit-changelog-gap-fix">'
+		.'#TB_window #plugin-information #section-changelog{padding-top:0!important;margin-top:0!important;}'
+		.'#TB_window #plugin-information #section-changelog>*:first-child{margin-top:0!important;}'
+		.'#TB_window #plugin-information #section-changelog p:empty{display:none;}'
+		.'#TB_window #plugin-information #section-changelog h1:first-child,'
+		.'#TB_window #plugin-information #section-changelog h2:first-child,'
+		.'#TB_window #plugin-information #section-changelog h3:first-child{margin-top:.2em!important;}'
+		.'</style>';
+}
+function crit_fix_changelog_spacing_js() {
+	echo '<script>(function($){$(document).on("tb_show",function(){'
+		.'var $c=$("#TB_window #plugin-information #section-changelog"); if(!$c.length){return;}'
+		.'$c.children("p").each(function(){var h=$(this).html();'
+		.'if(!h||h.replace(/(?:&nbsp;|<br\\s*\\/?>|\\s)+/gi,"")===""){($(this).remove());}else{return false;}});'
+		.'});})(jQuery);</script>';
+}
+
 
 /**
  * Будує HTML changelog із джерел у такому порядку:

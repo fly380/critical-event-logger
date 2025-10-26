@@ -216,7 +216,10 @@ if ( ! function_exists('critical_logger_more_hooks') ) {
 			critical_logger_log("AUTOMATIC UPDATES COMPLETE", 'NOTICE');
 		});
 
-		/* Зміна опцій (маскуємо секрети та глушимо шумні) */
+		/* =============================
+		 *  Зміна опцій — ЛЮДСЬКОЮ МОВОЮ для GeoBlock
+		 *  (маскує секрети, глушить шумні; для інших опцій лишає стару модель)
+		 * ============================= */
 		add_action('updated_option', function($option, $old, $new){
 			$name = (string)$option;
 
@@ -241,10 +244,136 @@ if ( ! function_exists('critical_logger_more_hooks') ) {
 			$skip = (bool) apply_filters('critical_logger_skip_updated_option', $skip, $name, $old, $new);
 			if ($skip) return;
 
+			// Хелпери форматування (без стрілкових функцій; з fallback’ом на mb_*)
+			$to_bool = function($v): bool {
+				if (is_bool($v)) return $v;
+				$s = is_scalar($v) ? strtolower((string)$v) : '';
+				return in_array($s, ['1','true','yes','on'], true);
+			};
+			$bool_uk = function($v) use ($to_bool): string { return $to_bool($v) ? 'увімкнено' : 'вимкнено'; };
+			$excerpt = function($s, $len=120): string {
+				$t = trim((string)$s);
+				if (function_exists('mb_strlen') && function_exists('mb_substr')) {
+					return (mb_strlen($t, 'UTF-8') > $len) ? (mb_substr($t, 0, $len, 'UTF-8').'…') : $t;
+				}
+				return (strlen($t) > $len) ? (substr($t, 0, $len).'…') : $t;
+			};
+			$csv_list = function($v, $limit=30): string {
+				$arr = is_array($v) ? $v : preg_split('/[\s,]+/u', (string)$v, -1, PREG_SPLIT_NO_EMPTY);
+				// normalize & unique
+				$tmp = [];
+				foreach ((array)$arr as $x) {
+					$x = trim((string)$x);
+					if ($x !== '') $tmp[$x] = true;
+				}
+				$arr = array_keys($tmp);
+				if (count($arr) > $limit) {
+					$head = array_slice($arr, 0, $limit);
+					return implode(', ', $head) . ' … (усього: '.count($arr).')';
+				}
+				return implode(', ', $arr);
+			};
+			$trust_label = function($v): string {
+				$s = strtolower((string)$v);
+				return $s === 'yes' ? 'Так (довіряю X-Forwarded-For)' : ($s === 'no' ? 'Ні' : 'Auto');
+			};
+			$resp_label = function($v): string {
+				switch ((string)$v) {
+					case '404': return '404 Not Found';
+					case '451': return '451 Legal Reasons';
+					case 'redirect': return 'Redirect';
+					case 'custom': return 'Custom HTML';
+					case '403':
+					default: return '403 Forbidden';
+				}
+			};
+			$rev_label = function($v) use ($to_bool): string {
+				return $to_bool($v) ? 'Whitelist (дозволені країни)' : 'Blacklist (заборонені країни)';
+			};
+
+			// Людські повідомлення лише для опцій GeoBlock
+			if (strpos($name, 'crit_geoblock_') === 0) {
+				$key = substr($name, strlen('crit_geoblock_'));
+				$msg = null;
+
+				switch ($key) {
+					case 'enabled':
+						$msg = 'GeoBlock: ' . $bool_uk($new) . ' (було: ' . $bool_uk($old) . ')';
+						break;
+
+					case 'reverse':
+						$msg = 'GeoBlock: режим → ' . $rev_label($new) . ' (було: ' . $rev_label($old) . ')';
+						break;
+
+					case 'countries':
+						$oldS = $csv_list($old);
+						$newS = $csv_list($new);
+						$msg  = 'GeoBlock: країни → ' . ($newS !== '' ? $newS : '—') .
+						        ' (було: ' . ($oldS !== '' ? $oldS : '—') . ')';
+						break;
+
+					case 'trust_proxy':
+						$msg = 'GeoBlock: довіра до проксі → ' . $trust_label($new) .
+						       ' (було: ' . $trust_label($old) . ')';
+					 break;
+
+					case 'fail_open':
+						$msg = 'GeoBlock: Fail-Open ' . $bool_uk($new) . ' (було: ' . $bool_uk($old) . ')';
+						break;
+
+					case 'preview_only':
+						$msg = 'GeoBlock: Превʼю (dry-run) ' . $bool_uk($new) . ' (було: ' . $bool_uk($old) . ')';
+						break;
+
+					case 'cache_ttl_hours':
+						$msg = 'GeoBlock: TTL GEO-кешу → ' . (int)$new . ' год (було: ' . (int)$old . ' год)';
+						break;
+
+					case 'response_mode':
+						$msg = 'GeoBlock: режим відповіді → ' . $resp_label($new) .
+						       ' (було: ' . $resp_label($old) . ')';
+						break;
+
+					case 'redirect_url':
+						$msg = 'GeoBlock: Redirect URL → ' . $excerpt($new, 140) .
+						       ' (було: ' . $excerpt($old, 140) . ')';
+						break;
+
+					case 'custom_html':
+						$msg = 'GeoBlock: Custom HTML оновлено → ' . $excerpt($new, 100);
+						break;
+
+					case 'use_intel':
+						$thr = (int) get_option('crit_geoblock_intel_threshold', 80);
+						$msg = 'GeoBlock: Intel-score ' . $bool_uk($new) . ' (поріг: ' . $thr . ')'
+						     . ' — було: ' . $bool_uk($old);
+						break;
+
+					case 'intel_threshold':
+						$on  = get_option('crit_geoblock_use_intel') ? 'увімкнено' : 'вимкнено';
+						$msg = 'GeoBlock: поріг Intel-score → ' . (int)$new . ' (було: ' . (int)$old . '), стан: ' . $on;
+						break;
+
+					case 'protect_own_country':
+						$msg = 'GeoBlock: захист від самоблокування ' . $bool_uk($new) . ' (було: ' . $bool_uk($old) . ')';
+						break;
+
+					// Якщо у тебе є така опція
+					case 'strict_consensus':
+						$msg = 'GeoBlock: строгий консенсус GEO ' . $bool_uk($new) . ' (було: ' . $bool_uk($old) . ')';
+						break;
+				}
+
+				if ($msg) {
+					critical_logger_log($msg, 'INFO');
+					return; // не дублюємо "UPDATED OPTION: …"
+				}
+			}
+
+			// Інші опції — як і було: з маскуванням секретів
 			$mask = (bool)preg_match('/(pass|secret|key|token|salt)/i', $name);
 			$oldS = $mask ? '[masked]' : (is_scalar($old) ? (string)$old : '[complex]');
 			$newS = $mask ? '[masked]' : (is_scalar($new) ? (string)$new : '[complex]');
-
 			critical_logger_log("UPDATED OPTION: {$name} ({$oldS} → {$newS})", $mask ? 'NOTICE' : 'INFO');
 		}, 10, 3);
 
@@ -289,7 +418,7 @@ if ( ! function_exists('critical_logger_more_hooks') ) {
 					return false;
 				}
 
-				// Патерн "php-подібних" файлів: .php або .php.{suffix} (suspected, bak, old, 1 тощо)
+				// Патерн "php-подібних" файлів: .php або .php.{suffix}
 				$phpLikeTail = '(?:\.php(?:[\.\-_][A-Za-z0-9]{1,20})?)';
 
 				// 3) Будь-які PHP під /wp-content/plugins|themes/ – завжди скан
@@ -297,7 +426,7 @@ if ( ! function_exists('critical_logger_more_hooks') ) {
 					return true;
 				}
 
-				// 4) Загальне правило: будь-який шлях, де останній сегмент виглядає як *.php або *.php.suspected і т.п.
+				// 4) Загальне правило: будь-який шлях, де останній сегмент *.php / *.php.suspected тощо
 				if (preg_match('#(?:^|/)[^/]{1,128}'.$phpLikeTail.'$#i', $path)) {
 					return true;
 				}
@@ -307,8 +436,8 @@ if ( ! function_exists('critical_logger_more_hooks') ) {
 					return true;
 				}
 
-				// За замовчуванням – не вважаємо сканом
-				return false;
+				// За замовчуванням – не скан
+			 return false;
 			}
 		}
 

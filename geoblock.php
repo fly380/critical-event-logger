@@ -2,12 +2,39 @@
 /**
  * Critical Event Logger — helper module
  * GeoBlock (без deny/винятків шляхів/секретних байпасів)
- * Анти-фальшпозитив: консенсус джерел + відсутність cookie-кешу
- * Захист від самоблокування адміну
+ * Анти-фальшпозитив: консенсус джерел (з можливістю мʼякшого режиму)
+ * Захист від самоблокування адміну + кнопка очистки GEO-кешу
  * License: GPLv2 or later
  */
 
 if (!defined('ABSPATH')) exit;
+
+/* =========================
+ * Helpers
+ * ========================= */
+
+/** Людська назва країни за ISO-2 (укр), з intl фолбеком і мінімальним словником */
+if (!function_exists('crit_geoblock_country_human')) {
+	function crit_geoblock_country_human(string $code, string $fallback = ''): string {
+		$code = strtoupper(trim($code));
+		if (!preg_match('/^[A-Z]{2}$/', $code)) return $fallback ?: $code;
+
+		// Спроба через PHP intl (якщо є)
+		if (class_exists('Locale')) {
+			$locale = function_exists('get_locale') ? get_locale() : 'uk_UA';
+			$name = \Locale::getDisplayRegion('-'.$code, $locale);
+			if (!empty($name) && $name !== '-'.$code) return $name;
+		}
+
+		// Мінімальний фолбек-словник
+		static $map = [
+			'UA'=>'Україна','PL'=>'Польща','US'=>'США','GB'=>'Велика Британія',
+			'DE'=>'Німеччина','FR'=>'Франція','CN'=>'Китай','RU'=>'Росія','KP'=>'Північна Корея',
+			'ID'=>'Індонезія','TR'=>'Туреччина','IT'=>'Італія','ES'=>'Іспанія',
+		];
+		return $map[$code] ?? ($fallback ?: $code);
+	}
+}
 
 /* =========================
  * Опції за замовчуванням
@@ -29,6 +56,7 @@ function crit_geoblock_get_opt($key, $default = null) {
 		'intel_threshold'      => 80,                             // score для блокування
 		'protect_own_country'  => true,                           // авто-захист від самоблокування країни адміну
 		'cookie_ttl_hours'     => 12,                             // лишилось для сумісності (не використ. у консенсусі)
+		'strict_consensus'     => false,                          // NEW: якщо true — використовуємо країну лише при "впевненості"
 	];
 	$opt = get_option('crit_geoblock_'.$key, null);
 	return ($opt === null) ? ($map[$key] ?? $default) : $opt;
@@ -114,7 +142,7 @@ function crit_geoblock_range_to_cidrs($start, $end): array {
 	$out = [];
 	while ($a <= $b) {
 		$maxSize = 32 - (int)floor(log(($a & -$a), 2));
-		$maxDiff = 32 - (int)floor(log($b - $a + 1, 2));
+		$maxDiff = 32 - (int)floor(log($b - $a + 1), 2);
 		$size = max($maxSize, $maxDiff);
 		$out[] = long2ip($a) . '/' . $size;
 		$a += 1 << (32 - $size);
@@ -129,10 +157,10 @@ function crit_geoblock_get_countries() {
 }
 
 /**
- * Консенсус GEO: CF (якщо є) + ip-api + ipwho.is + ipapi.co
+ * Консенсус GEO: CF (якщо є) + ip-api (pro/country.is) + ipwho.is + ipapi.co
  * Повертає: ['code'=>'UA','confident'=>true/false,'sources'=>['cf'=>'UA','ipapi'=>'UA',...]]
- * Упевненість: 2+ збіги, або CF збігається з будь-яким іншим.
- * TTL: confident → 2 год; інакше → 10 хв. Без cookie.
+ * Впевненість: ≥2 збіги, або CF збігається з будь-яким іншим.
+ * TTL: confident → cache_ttl_hours; інакше → min(10 хв, cache_ttl_hours)
  */
 function crit_geoblock_country_consensus(string $ip): array {
 	$res = ['code'=>'??','confident'=>false,'sources'=>[]];
@@ -160,18 +188,15 @@ function crit_geoblock_country_consensus(string $ip): array {
 		if (!is_wp_error($r1)) {
 			$d1 = json_decode(wp_remote_retrieve_body($r1), true);
 			if (($d1['status'] ?? '') === 'success' && !empty($d1['countryCode'])) {
-				$sources['ipapi'] = strtoupper($d1['countryCode']); // зберігаємо ключ 'ipapi' для сумісності
+				$sources['ipapi'] = strtoupper($d1['countryCode']); // зберігаємо ключ 'ipapi'
 			}
 		}
 	} else {
-		$r1 = wp_remote_get(
-			sprintf('https://country.is/%s', rawurlencode($ip)),
-			['timeout' => 6]
-		);
+		$r1 = wp_remote_get(sprintf('https://country.is/%s', rawurlencode($ip)), ['timeout'=>6]);
 		if (!is_wp_error($r1)) {
 			$d1 = json_decode(wp_remote_retrieve_body($r1), true);
 			if (!empty($d1['country']) && preg_match('/^[A-Z]{2}$/', strtoupper($d1['country']))) {
-				$sources['ipapi'] = strtoupper($d1['country']); // той самий ключ для існуючої логіки нижче
+				$sources['ipapi'] = strtoupper($d1['country']);
 			}
 		}
 	}
@@ -209,13 +234,13 @@ function crit_geoblock_country_consensus(string $ip): array {
 		} else {
 			if (isset($sources['cf'])) {
 				foreach ($sources as $name => $cc) {
-					if ($name !== 'cf' && $cc === $sources['cf']) {
-						$code = $cc; $conf = true; break;
-					}
+					if ($name !== 'cf' && $cc === $sources['cf']) { $code = $cc; $conf = true; break; }
 				}
 			}
 			if (!$conf && !empty($sources['ipapi'])) {
 				$code = $sources['ipapi'];
+			} elseif (!$conf && !empty($top)) {
+				$code = $top; // хоча б одне джерело для «мʼякого» режиму
 			}
 		}
 	}
@@ -224,16 +249,21 @@ function crit_geoblock_country_consensus(string $ip): array {
 	$res['confident'] = $conf;
 	$res['sources']   = $sources;
 
-	$ttl = $conf ? 2 * HOUR_IN_SECONDS : 10 * MINUTE_IN_SECONDS;
+	$ttl_hours = (int) crit_geoblock_get_opt('cache_ttl_hours', 12);
+	$ttl_hours = max(1, $ttl_hours);
+	$ttl = $conf ? $ttl_hours * HOUR_IN_SECONDS : min(10 * MINUTE_IN_SECONDS, $ttl_hours * HOUR_IN_SECONDS);
+
 	set_transient($ckey, $res, $ttl);
 
 	return $res;
 }
 
-/** Геттер коду країни з консенсусу (якщо НЕ впевнено — '??' для fail-open) */
+/** Ефективний код країни з урахуванням strict_consensus */
 function crit_geoblock_get_country($ip) {
-	$cons = crit_geoblock_country_consensus($ip);
-	return !empty($cons['confident']) ? ($cons['code'] ?? '??') : '??';
+	$cons   = crit_geoblock_country_consensus($ip);
+	$strict = (bool) crit_geoblock_get_opt('strict_consensus', false);
+	if ($strict && empty($cons['confident'])) return '??';
+	return $cons['code'] ?? '??';
 }
 
 /* =========================
@@ -266,10 +296,20 @@ function crit_geoblock_should_block($ip, $country): array {
 }
 
 /* =========================
- * Відповідь користувачу
+ * Відповідь користувачу (з анти-кеш заголовками)
  * ========================= */
 function crit_geoblock_send_response($mode, $ip, $country) {
+	if (!defined('DONOTCACHEPAGE')) define('DONOTCACHEPAGE', true);
 	nocache_headers();
+	header('Cache-Control: private, no-store, no-cache, must-revalidate, max-age=0');
+	header('Pragma: no-cache');
+	header('Expires: 0');
+	header('X-Robots-Tag: noindex, noarchive');
+	header('Vary: CF-Connecting-IP, X-Forwarded-For, X-Real-IP, Cookie');
+	header('X-Accel-Expires: 0');
+
+	$country_label = crit_geoblock_country_human($country, $country);
+
 	switch ($mode) {
 		case '404':
 			status_header(404);
@@ -284,20 +324,30 @@ function crit_geoblock_send_response($mode, $ip, $country) {
 			status_header(403);
 			$html = (string) crit_geoblock_get_opt('custom_html', '<h1>⛔ Доступ заборонено</h1>');
 			if (stripos($html, '<html') === false) {
-				wp_die($html . '<p style="color:#666;font-size:12px">('.esc_html($ip).' / '.esc_html($country).')</p>', 'GeoBlock', ['response'=>403]);
+				wp_die(
+					$html . '<p style="color:#666;font-size:12px">(' . esc_html($ip) . ' / ' . esc_html($country_label) . ')</p>',
+					'GeoBlock',
+					['response'=>403]
+				);
 			}
 			echo $html; exit;
 		case '403':
 		default:
 			status_header(403);
-			wp_die('<h1>⛔ Доступ заборонено</h1><p>Ваш IP (' . esc_html($ip) . ') з країни ' . esc_html($country) . ' не має доступу до сайту.</p>', 'GeoBlock', ['response'=>403]);
+			wp_die(
+				'<h1>⛔ Доступ заборонено</h1><p>Ваш IP (' . esc_html($ip) . ') з країни ' . esc_html($country_label) . ' не має доступу до сайту.</p>',
+				'GeoBlock',
+				['response'=>403]
+			);
 	}
 }
 
 /* =========================
- * Основна логіка (front only)
+ * Основна логіка (front only) — запускаємо в 2 місцях
  * ========================= */
-add_action('init', function(){
+function crit_geoblock_maybe_block() {
+	static $ran = false; if ($ran) return; $ran = true;
+
 	if (is_admin()) return;
 	if (defined('DOING_AJAX') && DOING_AJAX) return;
 	if (defined('DOING_CRON') && DOING_CRON) return;
@@ -309,37 +359,57 @@ add_action('init', function(){
 	if ($ip === '') return;
 
 	$cons    = crit_geoblock_country_consensus($ip);
-	$country = !empty($cons['confident']) ? ($cons['code'] ?? '??') : '??';
+	$country = crit_geoblock_get_country($ip); // ЕФЕКТИВНИЙ код (з урахуванням strict_consensus)
 
 	$verdict = crit_geoblock_should_block($ip, $country);
 	$preview = (bool) crit_geoblock_get_opt('preview_only', false);
 
 	if (!empty($verdict['block'])) {
 		// --- коротке логування + маркер бота ---
-		$log_file = crit_log_file();
+		$log_file = function_exists('crit_log_file') ? crit_log_file() : '';
 		$ua_raw   = $_SERVER['HTTP_USER_AGENT'] ?? '';
-		$bot_tag  = '';
-		if (stripos($ua_raw, 'bingbot/2.0') !== false) {
-			$bot_tag = ' (bingbot)';
-		} elseif (stripos($ua_raw, 'SemrushBot/7~bl') !== false) {
-			$bot_tag = ' (SemrushBot)';
-		}
+		$bot_tag  = (stripos($ua_raw, 'bingbot/2.0') !== false) ? ' (bingbot)' : ((stripos($ua_raw, 'SemrushBot/7~bl') !== false) ? ' (SemrushBot)' : '');
 
 		if ($preview) {
-			$entry = '[' . crit_log_time() . "][GeoBlock][$country][INFO] ПРЕВʼЮ: Заблоковано вхід з країни $country ($ip)$bot_tag\n";
-			@file_put_contents($log_file, $entry, FILE_APPEND | LOCK_EX);
+			if ($log_file) { @file_put_contents($log_file, '[' . (function_exists('crit_log_time') ? crit_log_time() : gmdate('c')) . "][GeoBlock][$country][INFO] ПРЕВʼЮ: Заблоковано вхід з країни $country ($ip)$bot_tag\n", FILE_APPEND | LOCK_EX); }
 			return;
 		}
 
-		$entry = '[' . crit_log_time() . "][GeoBlock][$country][WARN] Заблоковано вхід з країни $country ($ip)$bot_tag\n";
-		@file_put_contents($log_file, $entry, FILE_APPEND | LOCK_EX);
+		if ($log_file) { @file_put_contents($log_file, '[' . (function_exists('crit_log_time') ? crit_log_time() : gmdate('c')) . "][GeoBlock][$country][WARN] Заблоковано вхід з країни $country ($ip)$bot_tag\n", FILE_APPEND | LOCK_EX); }
 
 		crit_geoblock_send_response((string) crit_geoblock_get_opt('response_mode','403'), $ip, $country);
-	} else {
-		// Раніше тут писався INFO про fail-open з масою полів — прибрано, щоб лог не роздувався.
-		return;
 	}
-}, 0);
+	// дозвол — нічого не пишемо
+}
+add_action('init', 'crit_geoblock_maybe_block', 0);
+add_action('template_redirect', 'crit_geoblock_maybe_block', 0);
+
+/* =========================
+ * Очистка GEO-кешу (transients)
+ * ========================= */
+function crit_geoblock_purge_geo_transients(): int {
+	global $wpdb;
+	$total = 0;
+
+	// options table
+	$like1 = $wpdb->esc_like('_transient_crit_geo_consensus_') . '%';
+	$like2 = $wpdb->esc_like('_transient_timeout_crit_geo_consensus_') . '%';
+	$c1 = $wpdb->query( $wpdb->prepare("DELETE FROM {$wpdb->options} WHERE option_name LIKE %s", $like1) );
+	$c2 = $wpdb->query( $wpdb->prepare("DELETE FROM {$wpdb->options} WHERE option_name LIKE %s", $like2) );
+	if (is_numeric($c1)) $total += (int)$c1;
+	if (is_numeric($c2)) $total += (int)$c2;
+
+	// multisite site_transients (sitemeta)
+	if (is_multisite()) {
+		$like3 = $wpdb->esc_like('_site_transient_crit_geo_consensus_') . '%';
+		$like4 = $wpdb->esc_like('_site_transient_timeout_crit_geo_consensus_') . '%';
+		$sm = $wpdb->sitemeta;
+		$wpdb->query( $wpdb->prepare("DELETE FROM {$sm} WHERE meta_key LIKE %s", $like3) );
+		$wpdb->query( $wpdb->prepare("DELETE FROM {$sm} WHERE meta_key LIKE %s", $like4) );
+	}
+
+	return $total;
+}
 
 /* =========================
  * Адмінка (охайний інтерфейс)
@@ -360,7 +430,9 @@ function crit_geoblock_settings_page() {
 	$diag_ip = crit_geoblock_client_ip();
 	$cons    = $diag_ip ? crit_geoblock_country_consensus($diag_ip) : ['code'=>'—','confident'=>false,'sources'=>[]];
 	$myCC    = !empty($cons['confident']) ? ($cons['code'] ?? '') : '';
+	$effCC   = $diag_ip ? crit_geoblock_get_country($diag_ip) : '??';
 
+	// Збереження
 	if (isset($_POST['crit_geoblock_save'])) {
 		check_admin_referer('crit_geoblock_save_action', 'crit_geoblock_nonce');
 
@@ -378,6 +450,7 @@ function crit_geoblock_settings_page() {
 		$useIntel  = !empty($_POST['crit_geoblock_use_intel']);
 		$intelThr  = (int)($_POST['crit_geoblock_intel_threshold'] ?? 80);
 		$protect   = !empty($_POST['crit_geoblock_protect_own_country']);
+		$strict    = !empty($_POST['crit_geoblock_strict_consensus']);
 
 		// Захист від самоблокування: якщо blacklist і моя країна у списку — вилучити її
 		$removedSelf = false;
@@ -400,6 +473,7 @@ function crit_geoblock_settings_page() {
 		update_option('crit_geoblock_use_intel',           $useIntel);
 		update_option('crit_geoblock_intel_threshold',     $intelThr);
 		update_option('crit_geoblock_protect_own_country', $protect);
+		update_option('crit_geoblock_strict_consensus',    $strict);
 
 		echo '<div class="notice notice-success"><p>✅ Налаштування GeoBlock збережено.</p></div>';
 		if ($removedSelf) {
@@ -407,34 +481,43 @@ function crit_geoblock_settings_page() {
 		}
 
 		// оновимо діагностику після збереження
-		$cons = $diag_ip ? crit_geoblock_country_consensus($diag_ip) : ['code'=>'—','confident'=>false,'sources'=>[]];
-		$myCC = !empty($cons['confident']) ? ($cons['code'] ?? '') : '';
+		$cons  = $diag_ip ? crit_geoblock_country_consensus($diag_ip) : ['code'=>'—','confident'=>false,'sources'=>[]];
+		$myCC  = !empty($cons['confident']) ? ($cons['code'] ?? '') : '';
+		$effCC = $diag_ip ? crit_geoblock_get_country($diag_ip) : '??';
 	}
 
-	$enabled     = crit_geoblock_get_opt('enabled');
-	$reverse     = crit_geoblock_get_opt('reverse');
-	$trust       = crit_geoblock_get_opt('trust_proxy');
-	$countriesStr= implode(', ', crit_geoblock_get_opt('countries'));
-	$allowIps    = implode("\n", (array)crit_geoblock_get_opt('allow_ips'));
-	$respMode    = (string)crit_geoblock_get_opt('response_mode','403');
-	$redirUrl    = (string)crit_geoblock_get_opt('redirect_url', home_url('/'));
-	$cHtml       = (string)crit_geoblock_get_opt('custom_html','');
-	$ttl         = (int)crit_geoblock_get_opt('cache_ttl_hours',12);
-	$failOpen    = (bool)crit_geoblock_get_opt('fail_open',true);
-	$preview     = (bool)crit_geoblock_get_opt('preview_only',false);
-	$useIntel    = (bool)crit_geoblock_get_opt('use_intel',false);
-	$intelThr    = (int)crit_geoblock_get_opt('intel_threshold',80);
-	$protect     = (bool)crit_geoblock_get_opt('protect_own_country',true);
+	// Кнопка очистки GEO-кешу
+	if (isset($_POST['crit_geoblock_purge'])) {
+		check_admin_referer('crit_geoblock_save_action', 'crit_geoblock_nonce');
+		$removed = crit_geoblock_purge_geo_transients();
+		echo '<div class="notice notice-success"><p>🧹 Очищено GEO-кеш (transients): <strong>'.(int)$removed.'</strong> записів.</p></div>';
+	}
+
+	$enabled      = crit_geoblock_get_opt('enabled');
+	$reverse      = crit_geoblock_get_opt('reverse');
+	$trust        = crit_geoblock_get_opt('trust_proxy');
+	$countriesStr = implode(', ', crit_geoblock_get_opt('countries'));
+	$allowIps     = implode("\n", (array)crit_geoblock_get_opt('allow_ips'));
+	$respMode     = (string)crit_geoblock_get_opt('response_mode','403');
+	$redirUrl     = (string)crit_geoblock_get_opt('redirect_url', home_url('/'));
+	$cHtml        = (string)crit_geoblock_get_opt('custom_html','');
+	$ttl          = (int)crit_geoblock_get_opt('cache_ttl_hours',12);
+	$failOpen     = (bool)crit_geoblock_get_opt('fail_open',true);
+	$preview      = (bool)crit_geoblock_get_opt('preview_only',false);
+	$useIntel     = (bool)crit_geoblock_get_opt('use_intel',false);
+	$intelThr     = (int)crit_geoblock_get_opt('intel_threshold',80);
+	$protect      = (bool)crit_geoblock_get_opt('protect_own_country',true);
+	$strict       = (bool)crit_geoblock_get_opt('strict_consensus',false);
 
 	// Підсумковий вердикт (за поточними опціями)
-	$diag_v  = $diag_ip ? crit_geoblock_should_block($diag_ip, (!empty($cons['confident']) ? ($cons['code'] ?? '??') : '??')) : ['block'=>false,'reason'=>'no-ip'];
+	$diag_v  = $diag_ip ? crit_geoblock_should_block($diag_ip, $effCC) : ['block'=>false,'reason'=>'no-ip'];
 	$src_str = $cons['sources'] ? implode(', ', array_map(function($k,$v){ return "$k=$v"; }, array_keys($cons['sources']), $cons['sources'])) : '-';
 
 	echo '<div class="wrap crit-geo-wrap" data-mycc="'.esc_attr($myCC).'">';
 
 	// === СТИЛІ інтерфейсу ===
 	echo '<style>
-		.crit-geo-wrap{ --c-border:#e5e7eb; --c-muted:#64748b; --c-bg:#fff; --c-pill:#eef2ff; --c-ok:#059669; --c-bad:#b91c1c; --c-warn:#b45309; }
+		.crit-geo-wrap{ --c-border:#e5e7eb; --c-muted:#64748b; --c-bg:#fff; }
 		.crit-head{display:flex;gap:12px;justify-content:space-between;align-items:center;margin-bottom:12px}
 		.crit-head h1{margin:0}
 		.crit-chips{display:flex;gap:8px;flex-wrap:wrap}
@@ -442,46 +525,35 @@ function crit_geoblock_settings_page() {
 		.chip.ok{border-color:#bbf7d0;background:#f0fdf4}
 		.chip.bad{border-color:#fecaca;background:#fef2f2}
 		.chip.warn{border-color:#fde68a;background:#fffbeb}
-
 		.crit-grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:12px}
-		.col-7{grid-column:span 7}
-		.col-5{grid-column:span 5}
+		.col-7{grid-column:span 7}.col-5{grid-column:span 5}
 		@media(max-width:1100px){ .col-7,.col-5{grid-column:span 12} }
-
 		.card{background:var(--c-bg);border:1px solid var(--c-border);border-radius:10px;padding:12px}
 		.card h2{margin:0 0 8px;font-size:16px}
 		.desc{color:var(--c-muted);font-size:12px;margin:-2px 0 8px}
-		.row{margin:10px 0}
-		.row label{display:block;margin-bottom:6px}
+		.row{margin:10px 0}.row label{display:block;margin-bottom:6px}
 		input[type="text"],input[type="url"],textarea,select{width:100%;max-width:100%}
 		textarea{min-height:90px}
-		.sticky-save{position:sticky;bottom:0;z-index:10;background:#fff;border:1px solid var(--c-border);border-radius:10px;padding:10px;display:flex;justify-content:space-between;align-items:center;margin-top:12px}
-		.sticky-save .note{font-size:12px;color:var(--c-muted)}
-		.kbd{display:inline-block;border:1px solid #ddd;border-bottom-width:2px;border-radius:4px;padding:0 5px;font:12px/20px monospace;background:#f8f8f8}
-
-		.notice-inline{margin-top:8px}
+		.sticky-save{position:sticky;bottom:0;z-index:10;background:#fff;border:1px solid var(--c-border);border-radius:10px;padding:10px;display:flex;gap:10px;justify-content:space-between;align-items:center;margin-top:12px}
+		.sticky-save .note{font-size:12px;color:#64748b}
 	</style>';
 
 	// === ШАПКА з чіпами стану ===
 	echo '<div class="crit-head">';
-		echo '<h1>🌍 GeoBlock — Географічне блокування</h1>';
-		echo '<div class="crit-chips">';
-			echo '<span class="chip '.($enabled?'ok':'warn').'">'.($enabled?'Увімкнено':'Вимкнено').'</span>';
-			echo '<span class="chip">'.($reverse?'Whitelist':'Blacklist').'</span>';
-			$confChip = !empty($cons['confident']) ? '<span class="chip ok">Geo: впевнено</span>' : '<span class="chip warn">Geo: невпевнено</span>';
-			echo $confChip;
-			$verChip = !empty($diag_v['block'])
-				? '<span class="chip bad">Вердикт: BLOCK</span>'
-				: '<span class="chip ok">Вердикт: ALLOW</span>';
-			echo $verChip;
-		echo '</div>';
+	echo '<h1>🌍 GeoBlock — Географічне блокування</h1>';
+	echo '<div class="crit-chips">';
+	echo '<span class="chip '.($enabled?'ok':'warn').'">'.($enabled?'Увімкнено':'Вимкнено').'</span>';
+	echo '<span class="chip">'.($reverse?'Whitelist':'Blacklist').'</span>';
+	echo !empty($cons['confident']) ? '<span class="chip ok">Geo: впевнено</span>' : '<span class="chip warn">Geo: невпевнено</span>';
+	echo !empty($diag_v['block']) ? '<span class="chip bad">Вердикт: BLOCK</span>' : '<span class="chip ok">Вердикт: ALLOW</span>';
+	echo '<span class="chip">Effective CC: <code>'.esc_html($effCC ?: '??').'</code></span>';
+	echo '</div>';
+	echo '<button type="button" id="crit-geo-info-open" class="button button-secondary" aria-haspopup="dialog" aria-expanded="false" aria-controls="crit-geo-info-modal">Info</button>';
+	echo '</div>';
 
-	// Кнопка відкриття модалки
-      echo '<button type="button" id="crit-geo-info-open" class="button button-secondary" aria-haspopup="dialog" aria-expanded="false" aria-controls="crit-geo-info-modal">Info</button>';
-    echo '</div>';
 	// === ПОПЕРЕДЖЕННЯ про самоблок (якщо доречно) ===
 	if (!$reverse && $myCC && in_array($myCC, array_map('trim', explode(',', strtoupper($countriesStr))), true)) {
-		echo '<div class="notice notice-error notice-inline"><p>⚠️ У чорному списку є ваша країна <strong>'.esc_html($myCC).'</strong>. '
+		echo '<div class="notice notice-error"><p>⚠️ У чорному списку є ваша країна <strong>'.esc_html($myCC).'</strong>. '
 		   . 'Увімкнено «Захист від самоблокування» — при збереженні країну буде вилучено автоматично.</p></div>';
 	}
 
@@ -494,99 +566,85 @@ function crit_geoblock_settings_page() {
 	// Ліва колонка (7)
 	echo '<div class="col-7">';
 
-		// Загальні
-		echo '<div class="card">';
-		echo '<h2>Загальні налаштування</h2><div class="desc">Базові параметри роботи GeoBlock.</div>';
-		echo '<div class="row"><label><input type="checkbox" name="crit_geoblock_enabled" value="1" '.checked($enabled,true,false).'> <strong>Увімкнути GeoBlock</strong></label></div>';
-		echo '<div class="row"><label><input type="checkbox" name="crit_geoblock_reverse" value="1" '.checked($reverse,true,false).'> Режим “дозволені країни” (інші блокуються)</label></div>';
-		echo '<div class="row"><label>Довіра до проксі (для реального IP):</label>
+	echo '<div class="card"><h2>Загальні налаштування</h2><div class="desc">Базові параметри роботи GeoBlock.</div>
+		<div class="row"><label><input type="checkbox" name="crit_geoblock_enabled" value="1" '.checked($enabled,true,false).'> <strong>Увімкнути GeoBlock</strong></label></div>
+		<div class="row"><label><input type="checkbox" name="crit_geoblock_reverse" value="1" '.checked($reverse,true,false).'> Режим “дозволені країни” (інші блокуються)</label></div>
+		<div class="row"><label><input type="checkbox" name="crit_geoblock_strict_consensus" value="1" '.checked($strict,true,false).'> Строгий консенсус (потрібно ≥2 збіги/CF+1)</label></div>
+		<div class="row"><label>Довіра до проксі (для реального IP):
 			<select name="crit_geoblock_trust_proxy">
 				<option value="auto" '.selected($trust,'auto',false).'>Auto</option>
 				<option value="yes"  '.selected($trust,'yes',false).'>Так (довіряю X-Forwarded-For)</option>
 				<option value="no"   '.selected($trust,'no',false).'>Ні</option>
-			</select></div>';
-		echo '</div>';
+			</select></label>
+		</div>
+	</div>';
 
-		// Країни
-		echo '<div class="card">';
-		echo '<h2>Країни</h2><div class="desc">ISO-коди через кому (напр. <code>UA, PL, US</code>)</div>';
-		echo '<div class="row"><label for="crit_geo_countries">Коди країн (ISO-2):</label>
-			<input id="crit_geo_countries" type="text" name="crit_geoblock_countries" value="'.esc_attr($countriesStr).'" placeholder="UA, PL, US"></div>';
-		echo '<div class="row"><small class="desc" id="crit_geo_self_hint" style="display:none;">⚠️ У списку виявлено вашу країну — це призведе до блокування (у blacklist). Збереження автоматично її прибере, якщо увімкнено захист.</small></div>';
-		echo '</div>';
+	echo '<div class="card"><h2>Країни</h2><div class="desc">ISO-коди через кому (напр. <code>UA, PL, US</code>)</div>
+		<div class="row"><label for="crit_geo_countries">Коди країн (ISO-2):</label>
+		<input id="crit_geo_countries" type="text" name="crit_geoblock_countries" value="'.esc_attr($countriesStr).'" placeholder="UA, PL, US"></div>
+		<div class="row"><small class="desc" id="crit_geo_self_hint" style="display:none;">⚠️ У списку виявлено вашу країну — це призведе до блокування (у blacklist). Збереження автоматично її прибере, якщо увімкнено захист.</small></div>
+	</div>';
 
-		// Allow IP
-		echo '<div class="card">';
-		echo '<h2>Allow IP (опційно)</h2><div class="desc">IP / CIDR або діапазони <code>start-end</code>, кожен у новому рядку.</div>';
-		echo '<div class="row"><textarea name="crit_geoblock_allow_ips" rows="5" placeholder="203.0.113.10&#10;203.0.113.0/24&#10;203.0.113.10-203.0.113.20">'.esc_textarea($allowIps).'</textarea></div>';
-		echo '</div>';
+	echo '<div class="card"><h2>Allow IP (опційно)</h2><div class="desc">IP / CIDR або діапазони <code>start-end</code>, кожен у новому рядку.</div>
+		<div class="row"><textarea name="crit_geoblock_allow_ips" rows="5" placeholder="203.0.113.10&#10;203.0.113.0/24&#10;203.0.113.10-203.0.113.20">'.esc_textarea($allowIps).'</textarea></div>
+	</div>';
 
-	echo '</div>';
+	echo '</div>'; // col-7
 
 	// Права колонка (5)
 	echo '<div class="col-5">';
 
-		// Режим відповіді
-		echo '<div class="card">';
-		echo '<h2>Режим відповіді</h2><div class="desc">Що побачить заблокований користувач.</div>';
-		echo '<div class="row"><label>Тип відповіді:</label>
+	echo '<div class="card"><h2>Режим відповіді</h2><div class="desc">Що побачить заблокований користувач.</div>
+		<div class="row"><label>Тип відповіді:
 			<select name="crit_geoblock_response_mode">
 				<option value="403" '.selected($respMode,'403',false).'>403 Forbidden</option>
 				<option value="404" '.selected($respMode,'404',false).'>404 Not Found</option>
 				<option value="451" '.selected($respMode,'451',false).'>451 Legal Reasons</option>
 				<option value="redirect" '.selected($respMode,'redirect',false).'>Redirect</option>
 				<option value="custom" '.selected($respMode,'custom',false).'>Custom HTML</option>
-			</select></div>';
-		echo '<div class="row"><label>Redirect URL:</label>
-			<input type="url" name="crit_geoblock_redirect_url" value="'.esc_attr($redirUrl).'" placeholder="'.esc_attr(home_url('/')).'"></div>';
-		echo '<div class="row"><label>Custom HTML:</label>
-			<textarea name="crit_geoblock_custom_html" rows="4" placeholder="<h1>⛔ Доступ заборонено</h1>">'.esc_textarea($cHtml).'</textarea></div>';
-		echo '</div>';
+			</select></label></div>
+		<div class="row"><label>Redirect URL: <input type="url" name="crit_geoblock_redirect_url" value="'.esc_attr($redirUrl).'" placeholder="'.esc_attr(home_url('/')).'"></label></div>
+		<div class="row"><label>Custom HTML:<br>
+			<textarea name="crit_geoblock_custom_html" rows="4" placeholder="<h1>⛔ Доступ заборонено</h1>">'.esc_textarea($cHtml).'</textarea></label></div>
+	</div>';
 
-		// Кеш/надійність
-		echo '<div class="card">';
-		echo '<h2>Кеш і надійність</h2><div class="desc">Fail-open пропускає трафік при невпевненості GEO.</div>';
-		echo '<div class="row"><label>Geo-cache TTL (год):</label>
-			<input type="number" name="crit_geoblock_cache_ttl_hours" min="1" value="'.(int)$ttl.'" style="width:120px"></div>';
-		echo '<div class="row"><label><input type="checkbox" name="crit_geoblock_fail_open" value="1" '.checked($failOpen,true,false).'> Якщо GEO-API невпевнене/недоступне — пропускати (Fail-Open)</label></div>';
-		echo '<div class="row"><label><input type="checkbox" name="crit_geoblock_preview_only" value="1" '.checked($preview,true,false).'> Превʼю (тільки логувати, без блокування)</label></div>';
-		echo '</div>';
+	echo '<div class="card"><h2>Кеш і надійність</h2><div class="desc">Fail-open пропускає трафік при невпевненості GEO.</div>
+		<div class="row"><label>Geo-cache TTL (год): <input type="number" name="crit_geoblock_cache_ttl_hours" min="1" value="'.(int)$ttl.'" style="width:120px"></label></div>
+		<div class="row"><label><input type="checkbox" name="crit_geoblock_fail_open" value="1" '.checked($failOpen,true,false).'> Якщо GEO-API невпевнене/недоступне — пропускати (Fail-Open)</label></div>
+		<div class="row"><label><input type="checkbox" name="crit_geoblock_preview_only" value="1" '.checked($preview,true,false).'> Превʼю (тільки логувати, без блокування)</label></div>
+	</div>';
 
-		// Інтел
-		echo '<div class="card">';
-		echo '<h2>Інтел (опційно)</h2><div class="desc">Додаткове правило блокування за <em>intel-score</em> (див. модуль інтел-аналізу).</div>';
-		echo '<div class="row"><label><input type="checkbox" name="crit_geoblock_use_intel" value="1" '.checked($useIntel,true,false).'> Використовувати intel-score</label></div>';
-		echo '<div class="row"><label>Поріг score:</label> <input type="number" name="crit_geoblock_intel_threshold" value="'.(int)$intelThr.'" min="0" max="150" style="width:120px"></div>';
-		echo '</div>';
+	echo '<div class="card"><h2>Інтел (опційно)</h2><div class="desc">Додаткове правило блокування за <em>intel-score</em> (див. модуль інтел-аналізу).</div>
+		<div class="row"><label><input type="checkbox" name="crit_geoblock_use_intel" value="1" '.checked($useIntel,true,false).'> Використовувати intel-score</label></div>
+		<div class="row"><label>Поріг score: <input type="number" name="crit_geoblock_intel_threshold" value="'.(int)$intelThr.'" min="0" max="150" style="width:120px"></label></div>
+	</div>';
 
-		// Захист
-		echo '<div class="card">';
-		echo '<h2>Захист</h2><div class="desc">Анти-самоблокування для адміністратора.</div>';
-		echo '<div class="row"><label><input type="checkbox" name="crit_geoblock_protect_own_country" value="1" '.checked($protect,true,false).'> Автоматично вилучати мою країну з blacklist під час збереження</label></div>';
-		echo '</div>';
+	$ccLabel = esc_html($cons['code']);
+	$confLbl = !empty($cons['confident']) ? '<span class="chip ok">впевнено</span>' : '<span class="chip warn">невпевнено</span>';
+	$verChip = !empty($diag_v['block']) ? '<span class="chip bad">BLOCK</span>' : '<span class="chip ok">ALLOW</span>';
+	echo '<div class="card"><h2>Діагностика</h2><div class="desc">Поточне визначення для вашого підключення.</div>
+		<div class="row">IP: <code>'.esc_html($diag_ip ?: '—').'</code></div>
+		<div class="row">Country (consensus): <code>'.$ccLabel.'</code> '.$confLbl.'</div>
+		<div class="row">Effective country (used): <code>'.esc_html($effCC ?: '??').'</code></div>
+		<div class="row">Sources: <code>'.esc_html($src_str).'</code></div>
+		<div class="row">Вердикт: '.$verChip.' <small class="desc">('.esc_html($diag_v['reason'] ?? '').')</small></div>
+	</div>';
 
-		// Діагностика
-		$ccLabel = esc_html($cons['code']);
-		$confLbl = !empty($cons['confident']) ? '<span class="chip ok">впевнено</span>' : '<span class="chip warn">невпевнено</span>';
-		$verChip = !empty($diag_v['block']) ? '<span class="chip bad">BLOCK</span>' : '<span class="chip ok">ALLOW</span>';
-		echo '<div class="card">';
-		echo '<h2>Діагностика</h2><div class="desc">Поточне визначення для вашого підключення.</div>';
-		echo '<div class="row">IP: <code>'.esc_html($diag_ip ?: '—').'</code></div>';
-		echo '<div class="row">Country (consensus): <code>'.$ccLabel.'</code> '.$confLbl.'</div>';
-		echo '<div class="row">Sources: <code>'.esc_html($src_str).'</code></div>';
-		echo '<div class="row">Вердикт: '.$verChip.' <small class="desc">('.esc_html($diag_v['reason'] ?? '').')</small></div>';
-		echo '</div>';
-
-	echo '</div>'; // правий стовпчик
+	echo '</div>'; // col-5
 
 	echo '</div>'; // grid
 
-	// Липка панель Зберегти
-	echo '<div class="sticky-save">';
-	echo '<div><input type="submit" name="crit_geoblock_save" class="button button-primary" value="💾 Зберегти"></div>';
-	echo '</div>';
+	// Липка панель: Зберегти + Очистити GEO-кеш
+	echo '<div class="sticky-save">
+		<div>
+			<input type="submit" name="crit_geoblock_save" class="button button-primary" value="💾 Зберегти">
+			<button type="submit" name="crit_geoblock_purge" class="button">🧹 Очистити GEO-кеш</button>
+		</div>
+		<div class="note">Під час тестів VPN після зміни IP натискайте «🧹 Очистити GEO-кеш».</div>
+	</div>';
 
 	echo '</form>';
+
 	// === INFO MODAL: довідка по GeoBlock ===
 echo '<style id="crit-geo-info-css">
 #crit-geo-info-modal[hidden]{display:none;}
@@ -598,10 +656,6 @@ echo '<style id="crit-geo-info-css">
 }
 #crit-geo-info-modal h2{margin:0 40px 6px 0;font-size:20px}
 #crit-geo-info-modal .crit-modal__body{line-height:1.55;max-height:70vh;overflow:auto;padding-right:4px}
-#crit-geo-info-modal .crit-modal__body h3{margin:14px 0 6px;font-size:15px}
-#crit-geo-info-modal .crit-modal__body ul{margin:6px 0 10px 20px}
-#crit-geo-info-modal .crit-modal__body li{margin:4px 0}
-#crit-geo-info-modal .crit-modal__body code{background:#f6f7f7;border:1px solid #e2e4e7;border-radius:3px;padding:1px 4px}
 #crit-geo-info-modal .crit-modal__close{
   position:absolute;right:12px;top:10px;border:0;background:transparent;font-size:22px;line-height:1;cursor:pointer;
 }
@@ -618,51 +672,20 @@ echo '<div id="crit-geo-info-modal" role="dialog" aria-modal="true" aria-labelle
       <h3>Що робить GeoBlock</h3>
       <ul>
         <li>Обмежує доступ до сайту за країною відвідувача (frontend). Адміністратори, <code>wp-admin</code>, AJAX/CRON — не блокуються.</li>
-        <li>Має два режими: <em>Blacklist</em> (блокуємо перелік країн) та <em>Whitelist</em> (дозволяємо лише перелік країн).</li>
+        <li>Режими: <em>Blacklist</em> (блокуємо перелік країн) та <em>Whitelist</em> (дозволяємо лише перелік країн).</li>
       </ul>
-
-      <h3>Як визначається країна (консенсус)</h3>
+      <h3>Як визначається країна</h3>
       <ul>
-        <li>Джерела: <code>HTTP_CF_IPCOUNTRY</code> (якщо сайт за Cloudflare), <code>ip-api.com</code>, <code>ipwho.is</code>, <code>ipapi.co</code>.</li>
-        <li><strong>Впевненість</strong>: коли співпало ≥2 джерела або <code>Cloudflare</code> збігся з будь-яким іншим.</li>
-        <li>Коли невпевнено або країна <code>??</code> — спрацьовує <em>Fail-Open</em> (пропускаємо), якщо опція увімкнена.</li>
-        <li>Кеш GEO: впевнено — ~2 год; невпевнено — ~10 хв.</li>
+        <li>Джерела: <code>HTTP_CF_IPCOUNTRY</code> (за Cloudflare), <code>ip-api.com</code>, <code>ipwho.is</code>, <code>ipapi.co</code>.</li>
+        <li><strong>Впевненість</strong>: ≥2 збіги, або <code>Cloudflare</code> збігся з будь-яким іншим.</li>
+        <li><strong>Strict consensus</strong> (опція): якщо увімкнено — блок/дозвіл базується лише на «впевнених» визначеннях.</li>
+        <li>Коли невпевнено або країна <code>??</code> — діє <em>Fail-Open</em>, якщо увімкнено.</li>
+        <li>Кеш GEO: впевнено — ~TTL (год) з опції; невпевнено — ~10 хв або менше.</li>
       </ul>
-
-      <h3>Опції</h3>
-      <ul>
-        <li><strong>Увімкнути GeoBlock</strong> — вмикає перевірку для фронтенду.</li>
-        <li><strong>Режим “дозволені країни”</strong> — <em>Whitelist</em>; без нього — <em>Blacklist</em>.</li>
-        <li><strong>Коди країн</strong> — ISO-2 через кому (напр. <code>UA, PL, US</code>).</li>
-        <li><strong>Allow IP</strong> — список IP / CIDR або діапазони <code>start-end</code>, які <em>завжди</em> дозволені.</li>
-        <li><strong>Довіра до проксі</strong> — <code>auto | yes | no</code>. Дозволяє брати реальний IP з <code>CF-Connecting-IP</code>, <code>X-Forwarded-For</code>, <code>X-Real-IP</code>.</li>
-        <li><strong>Режим відповіді</strong> — <code>403</code>, <code>404</code>, <code>451</code>, <code>redirect</code> або <code>custom</code>.</li>
-        <li><strong>Redirect URL</strong> — куди перенаправляти у режимі <em>redirect</em>.</li>
-        <li><strong>Custom HTML</strong> — власне повідомлення при блокуванні у режимі <em>custom</em>.</li>
-        <li><strong>Geo-cache TTL</strong> — тривалість кешування відповіді GEO.</li>
-        <li><strong>Fail-Open</strong> — якщо GEO-сервіси недоступні/невпевнені, трафік пропускається.</li>
-        <li><strong>Превʼю</strong> — “сухий запуск”: лише логування без реального блокування.</li>
-        <li><strong>Інтел (опційно)</strong> — якщо підключено <code>intel.php</code>, блокує при <em>score</em> ≥ порогу.</li>
-        <li><strong>Захист від самоблокування</strong> — під час збереження з <em>Blacklist</em> автоматично прибирає вашу країну зі списку.</li>
-      </ul>
-
-      <h3>Логування</h3>
-      <ul>
-        <li>Короткий формат: <code>Заблоковано вхід з країни CC (IP)</code>.</li>
-        <li>Якщо User-Agent містить <code>bingbot/2.0</code> або <code>SemrushBot/7~bl</code> — додається мітка <code>(bingbot)</code> / <code>(SemrushBot)</code>.</li>
-        <li>У режимі “Превʼю” рівень <code>INFO</code> з префіксом <code>ПРЕВʼЮ:</code>. Дозволи/Fail-Open у лог не пишуться.</li>
-      </ul>
-
-      <h3>Інфраструктура й безпека</h3>
-      <ul>
-        <li>Працює з реальним IP клієнта (Cloudflare/проксі враховуються згідно з “Довіра до проксі”).</li>
-        <li>Плагін <em>не</em> змінює <code>.htaccess</code>. У випадку проблем — просто вимкніть модуль.</li>
-      </ul>
-
       <h3>Поради</h3>
       <ul>
-        <li>Перевірку власного доступу дивись у блоці “Діагностика”.</li>
-        <li>Швидке збереження: <span class="crit-kbd">Ctrl</span> + <span class="crit-kbd">S</span>.</li>
+        <li>Під час тестів VPN використовуйте кнопку <strong>🧹 Очистити GEO-кеш</strong>.</li>
+        <li>Якщо фронтенд кешується поза WordPress (CDN/NGINX microcache), вимкніть «Cache Everything» для цього сайту або додайте виняток для відповідей <code>403</code>.</li>
       </ul>
     </div>
   </div>
@@ -676,38 +699,17 @@ echo '<div id="crit-geo-info-modal" role="dialog" aria-modal="true" aria-labelle
   var dialog = modal ? modal.querySelector(".crit-modal__dialog") : null;
   var lastFocus = null;
 
-  function openModal(){
-    if(!modal) return;
-    lastFocus = document.activeElement;
-    modal.removeAttribute("hidden");
-    if(openBn) openBn.setAttribute("aria-expanded","true");
-    setTimeout(function(){ if(dialog){ dialog.focus(); } }, 0);
-  }
-  function closeModal(){
-    if(!modal) return;
-    modal.setAttribute("hidden","hidden");
-    if(openBn) openBn.setAttribute("aria-expanded","false");
-    if(lastFocus && typeof lastFocus.focus === "function"){ lastFocus.focus(); }
-  }
+  function openModal(){ if(!modal) return; lastFocus = document.activeElement; modal.removeAttribute("hidden"); if(openBn) openBn.setAttribute("aria-expanded","true"); setTimeout(function(){ if(dialog){ dialog.focus(); } }, 0); }
+  function closeModal(){ if(!modal) return; modal.setAttribute("hidden","hidden"); if(openBn) openBn.setAttribute("aria-expanded","false"); if(lastFocus && typeof lastFocus.focus === "function"){ lastFocus.focus(); } }
 
   if(openBn) openBn.addEventListener("click", function(e){ e.preventDefault(); openModal(); });
   if(closeBn) closeBn.addEventListener("click", closeModal);
-  if(modal){
-    modal.addEventListener("click", function(e){
-      if(e.target && (e.target.getAttribute("data-close") || e.target.classList.contains("crit-modal__backdrop"))){
-        closeModal();
-      }
-    });
-  }
-  document.addEventListener("keydown", function(e){
-    if(e.key === "Escape" && modal && !modal.hasAttribute("hidden")){
-      e.preventDefault(); closeModal();
-    }
-  });
+  if(modal){ modal.addEventListener("click", function(e){ if(e.target && (e.target.getAttribute("data-close") || e.target.classList.contains("crit-modal__backdrop"))){ closeModal(); } }); }
+  document.addEventListener("keydown", function(e){ if(e.key === "Escape" && modal && !modal.hasAttribute("hidden")){ e.preventDefault(); closeModal(); } });
 })();
 </script>';
 
-	// Невеличкий JS: підсвічування ризику самоблоку (лайв)
+	// Лайв-підсвічування ризику самоблоку
 	echo '<script>
 	(function(){
 	  var input = document.getElementById("crit_geo_countries");
@@ -721,7 +723,6 @@ echo '<div id="crit-geo-info-modal" role="dialog" aria-modal="true" aria-labelle
 	    var t = (input.value||"").toUpperCase().split(",").map(function(s){return s.trim();}).filter(Boolean);
 	    var reverse = document.querySelector("input[name=crit_geoblock_reverse]")?.checked;
 	    var has = t.indexOf(myCC) !== -1;
-	    // попереджаємо лише у blacklist-режимі
 	    if(hint) hint.style.display = (!reverse && has) ? "block" : "none";
 	  }
 	  input.addEventListener("input", checkSelf);

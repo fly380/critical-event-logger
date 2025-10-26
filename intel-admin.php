@@ -186,15 +186,17 @@ function crit_intel_admin_page() {
 	echo '<form method="post" style="margin:12px 0;">';
 	wp_nonce_field('crit_purge_intel_cache_action', 'crit_purge_intel_cache_nonce');
 	echo '<input type="submit" class="button" name="crit_purge_intel_cache" value="🧽 Очистити кеш інтел/гео/пул">';
+	// Кнопка оновлення
+	echo '<p style="margin-top:10px;"><button id="crit-intel-refresh" class="button">Оновити</button></p>';
 	echo '</form>';
+	
 
 	// Контейнер таблиці
 	echo '<div id="crit-intel-container" style="max-height:520px; overflow-y:auto; border:1px solid #ddd; border-radius:6px; background:#fff; padding:6px;">';
 	echo '<div style="padding:12px; color:#666;">Завантаження інтел-даних…</div>';
 	echo '</div>';
 
-	// Кнопка оновлення
-	echo '<p style="margin-top:10px;"><button id="crit-intel-refresh" class="button">Оновити</button></p>';
+	
 
 	// JS: завантаження таблиці та керування модалкою
 	echo '<script>

@@ -628,7 +628,6 @@ function critical_logger_total_count_cb() {
 
 	wp_send_json_success(['count' => (int)$count]);
 }
-
 /* === AJAX: Виявлені IP (за частотою) === */
 add_action('wp_ajax_critical_logger_detected_ips', 'critical_logger_detected_ips_cb');
 function critical_logger_detected_ips_cb() {
@@ -638,6 +637,7 @@ function critical_logger_detected_ips_cb() {
 	$log_file = crit_log_file();
 	if (! file_exists($log_file)) wp_send_json_error('Лог-файл не знайдено', 404);
 
+	// рахуємо частоту появи IP по останніх 2000 записах
 	$entries   = crit_tail_entries($log_file, 2000);
 	$ip_counts = [];
 	foreach ($entries as $ln) {
@@ -652,20 +652,26 @@ function critical_logger_detected_ips_cb() {
 		echo '<table class="widefat striped" style="width:100%;">';
 		echo '<thead><tr>
 			<th>IP</th>
+			<th>Кількість</th>
 			<th>Пул</th>
 			<th>Гео</th>
 			<th>Дія</th>
 		</tr></thead><tbody>';
 
 		foreach ($ip_counts as $fip => $cnt) {
-			$style = crit_heat_style_from_count((int)$cnt); // лишаємо підсвітку за частотою
+			$style = crit_heat_style_from_count((int)$cnt); // підсвітка за частотою
 
 			echo '<tr>';
+			// IP
 			echo '<td style="' . esc_attr($style) . '">' . esc_html($fip) . '</td>';
+			// Кількість (новий стовпчик)
+			echo '<td style="text-align:left; width:90px;"><span class="badge" title="Кількість появ у останніх 2000 записах">' . (int)$cnt . '</span></td>';
+			// Пул/Гео — підвантажуються AJAX-ом
 			echo '<td class="crit-pool" data-ip="' . esc_attr($fip) . '"><em style="color:#888">…</em></td>';
-			echo '<td class="crit-geo" data-ip="' . esc_attr($fip) . '"><em style="color:#888">…</em></td>';
-			echo '<td>';
+			echo '<td class="crit-geo"  data-ip="' . esc_attr($fip) . '"><em style="color:#888">…</em></td>';
 
+			// Дія
+			echo '<td>';
 			// Кнопка "Блокувати IP"
 			echo '<form method="post" style="display:inline; margin-right:4px;">' .
 				 wp_nonce_field('manual_block_ip_action', 'manual_block_ip_nonce', true, false) .
@@ -680,7 +686,8 @@ function critical_logger_detected_ips_cb() {
 				 '<input type="submit" name="manual_block_ip" class="button button-small button-secondary js-block-pool" value="Блокувати пул" disabled title="Очікуємо визначення пулу…">' .
 			'</form>';
 
-			echo '</td></tr>';
+			echo '</td>';
+			echo '</tr>';
 		}
 
 		echo '</tbody></table>';

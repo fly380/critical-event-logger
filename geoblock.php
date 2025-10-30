@@ -65,6 +65,82 @@ function crit_geoblock_get_opt($key, $default = null) {
 /* =========================
  * Хелпери: IP/CIDR/GEO
  * ========================= */
+// === Bot UA detection helpers ===
+if (!function_exists('crit_geoblock_bot_patterns')) {
+	function crit_geoblock_bot_patterns(): array {
+		// ВАШ список шаблонів:
+		return [
+			'Googlebot'      => 'googlebot|adsbot-google|apis-google|mediapartners-google|feedfetcher-google|duplexweb-google',
+			'Bingbot'        => 'bingbot|adidxbot|msnbot',
+			'DuckDuckBot'    => 'duckduckbot|duckduckgo',
+			'Baidu'          => 'baiduspider',
+			'Yandex'         => 'yandex(bot|images|media|mobile|news|video|image|accessibility|metrika)',
+			'Applebot'       => 'applebot',
+			'PetalBot'       => 'petalbot',
+			'AhrefsBot'      => 'ahrefsbot',
+			'SemrushBot'     => 'semrush(bot)?',
+			'DotBot'         => 'dotbot',
+			'MJ12bot'        => 'mj12bot',
+			'Sogou'          => 'sogou',
+			'Exabot'         => 'exabot',
+			'SeznamBot'      => 'seznambot',
+			'Qwantify'       => 'qwantify',
+			'CCBot'          => 'ccbot|commoncrawl',
+			'Bytespider'     => 'bytespider',
+			// AI/ресерч краулери
+			'GPTBot'         => 'gptbot|chatgpt-user',
+			'ClaudeBot'      => 'claudebot|anthropic-ai',
+			'PerplexityBot'  => 'perplexitybot',
+			'PhindBot'       => 'phindbot',
+			'Omgili'         => 'omgili|omgilibot',
+			// Соціальні/прев’ю
+			'Facebook'       => 'facebookexternalhit|facebot',
+			'Twitter'        => 'twitterbot',
+			'LinkedIn'       => 'linkedinbot',
+			'Slack'          => 'slackbot',
+			'Telegram'       => 'telegrambot',
+			'Discord'        => 'discordbot',
+			'WhatsApp'       => 'whatsapp',
+			'Pinterest'      => 'pinterestbot',
+			// Headless / інструменти / скрейпери / бібліотеки
+			'Headless'       => 'headlesschrome|puppeteer|playwright|phantomjs|lighthouse|pagespeed',
+			'Libraries'      => 'curl|wget|python-requests|go-http-client|libwww-perl|okhttp|aiohttp|httpx|httpclient|java|scrapy|guzzlehttp',
+			// Моніторинги/аптайм
+			'Monitor'        => 'uptimerobot|pingdom|statuscake|newrelicpinger|datadog|nagios|zabbix|site24x7',
+		];
+	}
+}
+
+if (!function_exists('crit_geoblock_detect_bots')) {
+	/**
+	 * Повертає масив лейблів ботів, знайдених у UA (може бути 0..N).
+	 * Матчі case-insensitive, по всіх патернах.
+	 */
+	function crit_geoblock_detect_bots(string $ua_raw): array {
+		$found = [];
+		if ($ua_raw === '') return $found;
+		$patterns = crit_geoblock_bot_patterns();
+
+		foreach ($patterns as $label => $regex) {
+			// Безпечний, нечутливий до регістру матч
+			if (@preg_match('~' . $regex . '~i', $ua_raw)) {
+				if (preg_match('~' . $regex . '~i', $ua_raw)) {
+					$found[] = $label;
+				}
+			}
+		}
+		// Унікалізуємо/зберігаємо порядок
+		return array_values(array_unique($found));
+	}
+}
+
+if (!function_exists('crit_geoblock_bot_tag_string')) {
+	/** Формує рядок " (Bot1,Bot2)" або пустий рядок */
+	function crit_geoblock_bot_tag_string(string $ua_raw): string {
+		$tags = crit_geoblock_detect_bots($ua_raw);
+		return $tags ? ' (' . implode(',', $tags) . ')' : '';
+	}
+}
 
 /** Реальний IP з урахуванням CDN/проксі */
 function crit_geoblock_client_ip(): string {
@@ -353,7 +429,10 @@ function crit_geoblock_maybe_block() {
 	if (defined('DOING_CRON') && DOING_CRON) return;
 	if (wp_doing_cron()) return;
 	if (current_user_can('manage_options')) return;
-	if (!crit_geoblock_get_opt('enabled', false)) return;
+	// --- БІЛИЙ СПИСОК ДЛЯ ПОШУКОВИХ БОТІВ ---
+	if (function_exists('crit_is_allowed_bot') && crit_is_allowed_bot()) {
+		return; // Дозволяємо Googlebot/Bingbot індексувати сайт, навіть якщо GeoBlock увімкнено
+	}
 
 	$ip = crit_geoblock_client_ip();
 	if ($ip === '') return;
@@ -367,8 +446,8 @@ function crit_geoblock_maybe_block() {
 	if (!empty($verdict['block'])) {
 		// --- коротке логування + маркер бота ---
 		$log_file = function_exists('crit_log_file') ? crit_log_file() : '';
-		$ua_raw   = $_SERVER['HTTP_USER_AGENT'] ?? '';
-		$bot_tag  = (stripos($ua_raw, 'bingbot/2.0') !== false) ? ' (bingbot)' : ((stripos($ua_raw, 'SemrushBot/7~bl') !== false) ? ' (SemrushBot)' : '');
+		$ua_raw  = $_SERVER['HTTP_USER_AGENT'] ?? '';
+		$bot_tag = function_exists('crit_geoblock_bot_tag_string') ? crit_geoblock_bot_tag_string($ua_raw) : '';
 
 		if ($preview) {
 			if ($log_file) { @file_put_contents($log_file, '[' . (function_exists('crit_log_time') ? crit_log_time() : gmdate('c')) . "][GeoBlock][$country][INFO] ПРЕВʼЮ: Заблоковано вхід з країни $country ($ip)$bot_tag\n", FILE_APPEND | LOCK_EX); }

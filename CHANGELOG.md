@@ -28,3 +28,22 @@
 ## [Unreleased]
 - Оптимізації SQL-запитів при очищенні транзієнтів.
 - Дрібні удосконалення доступності (A11y) у таблицях.
+
+## [1.1.1] – 2025-10-30
+### Added
+* Сторінка адмінки «Боти-винятки» з керуванням списком корисних ботів: Google, Bing, DuckDuck, Applebot, Baidu, Yandex, PetalBot, Ahrefs, Semrush, DotBot, MJ12, Sogou, Exabot, SeznamBot, Qwantify, CCBot, Bytespider, GPTBot/ChatGPT-User, ClaudeBot, PerplexityBot, PhindBot, Omgili.
+* Строга перевірка справжності для основних пошукових ботів (rDNS + forward-confirm); для інших — режим UA-only.
+* Інтеграція з .htaccess: автоматичний блок **CRIT-BOT-ALLOW** із `SetEnvIfNoCase User-Agent` та змінними середовища `CRIT_ALLOW_*` для умовного обходу IP-блоків.
+* GeoBlock-білий список: безпечний обхід блокування для дозволених ботів через `crit_is_allowed_bot()` (з перевіркою rDNS).
+* Діагностика на сторінці «Боти-винятки» (поточні UA/IP, збіги за UA, статус дозволу).
+* Обмеження кількості бекапів `.htaccess.bak-YYYYMMDD-HHMMSS` до 3 (нове: константа `CRIT_BOT_BAK_KEEP` і фільтр `crit_bot_bak_keep`).
+
+### Changed
+* Меню «Боти-винятки» реєструється з пріоритетом `admin_menu` **99** — гарантовано зʼявляється після батьківського меню.
+* У GeoBlock логах тепер лейбляться **всі відомі боти** (через хелпер на базі патернів), а не лише `bingbot`/`SemrushBot`.
+* Опції зведено до масиву `crit_allow_bots` (збережено зворотну сумісність із `crit_allow_googlebot`/`crit_allow_bingbot`).
+* Ротація бекапів `.htaccess`: залишаємо тільки 3 найновіші.
+
+### Fixed
+* Коректні повідомлення, якщо `.htaccess` недоступний для запису; інструкції для ручної вставки блоку.
+* Стабільність визначення реального IP за проксі/CDN; кешування результатів перевірок у transient з TTL.

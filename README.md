@@ -179,51 +179,6 @@ License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
 ---
 
-## Додатки
-
-### Архітектурна схема
-
-```mermaid
-%% Critical Event Logger — Interaction Diagram (Mermaid)
-flowchart TD
-    A[WP core & plugins
-hooks/events] --> B(logger-hooks.php)
-    B --> C{critical_logger_log()}
-    C --> D[logger.php
-write with LOCK_EX]
-    D -->|append| E[events.log
-uploads/critical-event-logger/logs]
-    subgraph Admin UI
-        F[critical-logger.php
-admin pages + AJAX]
-        F --> G[View Logs
-AJAX tail + filters]
-        F --> H[Intelligence
-AbuseIPDB/VT/Spamhaus]
-        F --> I[GeoBlock settings]
-        F --> J[Rotation settings]
-        F --> K[.htaccess Blocklist UI]
-        F --> L[API Keys]
-    end
-    E --> G
-    subgraph Runtime Guards
-        M[geoblock.php
-init early]
-        N[.htaccess
-Apache only]
-        O[Nginx location deny]
-    end
-    M -->|allow/deny| P{Request}
-    P -->|deny| Q[403/blank/json + log]
-    P -->|allow| R[WP continues]
-    subgraph Rotation
-        S[WP-Cron daily]
-        S --> T[rotation.php
-size/time policy]
-        T --> U[events-YYYYmmdd-HHMMSS.log]
-        T --> V[prune old entries]
-    end
-```
 
 ### Швидкий чекліст налаштування
 

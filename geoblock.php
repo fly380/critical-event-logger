@@ -144,29 +144,43 @@ if (!function_exists('crit_geoblock_bot_tag_string')) {
 
 /** Реальний IP з урахуванням CDN/проксі */
 function crit_geoblock_client_ip(): string {
-	$trust = crit_geoblock_get_opt('trust_proxy', 'auto');
+	$trust  = crit_geoblock_get_opt('trust_proxy', 'auto');
+	$remote = trim($_SERVER['REMOTE_ADDR'] ?? '');
 
-	// Cloudflare
+	// Cloudflare — найнадійніший заголовок (підробити ззовні неможливо якщо стоїть CF)
 	if (($trust === 'auto' || $trust === 'yes') && !empty($_SERVER['HTTP_CF_CONNECTING_IP'])) {
 		$ip = trim($_SERVER['HTTP_CF_CONNECTING_IP']);
 		if (filter_var($ip, FILTER_VALIDATE_IP)) return $ip;
 	}
-	// X-Forwarded-For — перший публічний
-	if (($trust === 'yes') || ($trust === 'auto' && !empty($_SERVER['HTTP_X_FORWARDED_FOR']))) {
-		$xff = isset($_SERVER['HTTP_X_FORWARDED_FOR']) ? explode(',', $_SERVER['HTTP_X_FORWARDED_FOR']) : [];
+
+	// X-Forwarded-For — лише якщо REMOTE_ADDR є приватним (наш довірений проксі)
+	// Приватний REMOTE_ADDR означає що запит прийшов від локального балансувальника.
+	// Якщо REMOTE_ADDR публічний — XFF може бути підроблений зловмисником.
+	$remote_is_private = !filter_var(
+		$remote,
+		FILTER_VALIDATE_IP,
+		FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE
+	);
+	if (($remote_is_private || $trust === 'yes') && !empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+		$xff = array_map('trim', explode(',', $_SERVER['HTTP_X_FORWARDED_FOR']));
+		// Перший публічний IP в ланцюгу — оригінальний клієнт
 		foreach ($xff as $cand) {
-			$ip = trim($cand);
-			if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) return $ip;
+			if (filter_var($cand, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
+				return $cand;
+			}
 		}
 	}
-	// X-Real-IP
+
+	// X-Real-IP — зазвичай встановлює Nginx і є надійним (реальний клієнт)
 	if (($trust === 'auto' || $trust === 'yes') && !empty($_SERVER['HTTP_X_REAL_IP'])) {
 		$ip = trim($_SERVER['HTTP_X_REAL_IP']);
 		if (filter_var($ip, FILTER_VALIDATE_IP)) return $ip;
 	}
-	// REMOTE_ADDR
-	$ip = $_SERVER['REMOTE_ADDR'] ?? '';
-	return filter_var($ip, FILTER_VALIDATE_IP) ? $ip : '';
+
+	// Якщо trust=no або нічого не підійшло — REMOTE_ADDR
+	if ($remote && filter_var($remote, FILTER_VALIDATE_IP)) return $remote;
+
+	return '';
 }
 
 /** Розбір списку IP/CIDR/діапазонів */
@@ -217,7 +231,7 @@ function crit_geoblock_range_to_cidrs($start, $end): array {
 	if ($a > $b) [$a,$b] = [$b,$a];
 	$out = [];
 	while ($a <= $b) {
-		$maxSize = 32 - (int)floor(log(($a & -$a), 2));
+		$maxSize = 32 - (int)floor(log(($a & -$a) ?: 1, 2));
 		$maxDiff = 32 - (int)floor(log($b - $a + 1), 2);
 		$size = max($maxSize, $maxDiff);
 		$out[] = long2ip($a) . '/' . $size;
@@ -306,28 +320,31 @@ function crit_geoblock_country_consensus(string $ip): array {
 		$cnt = $votes[$top];
 
 		if ($cnt >= 2) {
-			$code = $top; $conf = true;
-		} else {
-			if (isset($sources['cf'])) {
-				foreach ($sources as $name => $cc) {
-					if ($name !== 'cf' && $cc === $sources['cf']) { $code = $cc; $conf = true; break; }
+			// Мінімум 2 джерела погоджуються — впевнено
+			$code = $top;
+			$conf = true;
+		} elseif (isset($sources['cf'])) {
+			// Cloudflare збігся хоча б з одним іншим
+			foreach ($sources as $name => $cc) {
+				if ($name !== 'cf' && $cc === $sources['cf']) {
+					$code = $cc;
+					$conf = true;
+					break;
 				}
 			}
-			if (!$conf && !empty($sources['ipapi'])) {
-				$code = $sources['ipapi'];
-			} elseif (!$conf && !empty($top)) {
-				$code = $top; // хоча б одне джерело для «мʼякого» режиму
-			}
 		}
+		// Якщо впевненості немає — залишаємо code='??' щоб fail_open спрацював
 	}
 
 	$res['code']      = $code;
 	$res['confident'] = $conf;
 	$res['sources']   = $sources;
 
-	$ttl_hours = (int) crit_geoblock_get_opt('cache_ttl_hours', 12);
-	$ttl_hours = max(1, $ttl_hours);
-	$ttl = $conf ? $ttl_hours * HOUR_IN_SECONDS : min(10 * MINUTE_IN_SECONDS, $ttl_hours * HOUR_IN_SECONDS);
+	$ttl_hours = max(1, (int) crit_geoblock_get_opt('cache_ttl_hours', 12));
+	// Впевнено → кешуємо довго; невпевнено → 5 хвилин (швидко перевіримо знову)
+	$ttl = $conf
+		? $ttl_hours * HOUR_IN_SECONDS
+		: 5 * MINUTE_IN_SECONDS;
 
 	set_transient($ckey, $res, $ttl);
 
@@ -338,7 +355,13 @@ function crit_geoblock_country_consensus(string $ip): array {
 function crit_geoblock_get_country($ip) {
 	$cons   = crit_geoblock_country_consensus($ip);
 	$strict = (bool) crit_geoblock_get_opt('strict_consensus', false);
-	if ($strict && empty($cons['confident'])) return '??';
+
+	// Без впевненості завжди повертаємо '??' — fail_open у should_block вирішить пропустити чи заблокувати.
+	// strict_consensus лише підкреслює цю поведінку (залишено для сумісності з UI).
+	if (!$cons['confident'] || ($strict && !$cons['confident'])) {
+		return '??';
+	}
+
 	return $cons['code'] ?? '??';
 }
 

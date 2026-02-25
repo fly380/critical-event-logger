@@ -63,21 +63,41 @@ function crit_rotate_logs($force = false) {
 			}
 		}
 
-		// === 2) ОЧИСТКА: видалити рядки старші N днів ===
-		$lines = @file($log_file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-		if ($lines) {
-			$limit_ts  = time() - ($max_days * DAY_IN_SECONDS);
-			$new_lines = [];
-			foreach ($lines as $ln) {
-				if (preg_match('/^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]/', $ln, $m)) {
+		// === 2) ОЧИСТКА: видалити рядки старші N днів (потоковий запис — не вантажимо весь файл у RAM) ===
+		$limit_ts = time() - ($max_days * DAY_IN_SECONDS);
+		$tmp_file = $log_file . '.tmp-' . getmypid();
+		$in  = @fopen($log_file, 'r');
+		$out = @fopen($tmp_file, 'w');
+
+		if ($in && $out) {
+			$kept    = 0;
+			$removed = 0;
+			while (($ln = fgets($in)) !== false) {
+				$ln_trim = rtrim($ln, "\r\n");
+				if ($ln_trim === '') continue; // пропускаємо порожні рядки
+				if (preg_match('/^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]/', $ln_trim, $m)) {
 					$ts = strtotime($m[1]);
-					if ($ts >= $limit_ts) $new_lines[] = $ln;
-				} else {
-					// якщо рядок без дати — зберігаємо
-					$new_lines[] = $ln;
+					if ($ts < $limit_ts) { $removed++; continue; } // старий — пропускаємо
 				}
+				// рядок без дати або свіжий — зберігаємо
+				fwrite($out, $ln_trim . "\n");
+				$kept++;
 			}
-			@file_put_contents($log_file, implode("\n", $new_lines), LOCK_EX);
+			fclose($in);
+			fclose($out);
+
+			if ($removed > 0) {
+				// Атомарна заміна: rename() є атомарним на більшості ОС
+				@rename($tmp_file, $log_file);
+			} else {
+				// Нічого не видалено — прибираємо тимчасовий файл
+				@unlink($tmp_file);
+			}
+		} else {
+			// Не вдалося відкрити файли — прибираємо tmp якщо залишився
+			if ($out) fclose($out);
+			if ($in)  fclose($in);
+			@unlink($tmp_file);
 		}
 
 		// === 3) СЛУЖБОВЕ ПОВІДОМЛЕННЯ У ЛОГ ===
@@ -152,11 +172,15 @@ if (!function_exists('crit_render_sparkline')) {
 
 /**
  * Плануємо виконання через WP-Cron (щодоби)
+ * Реєструємо всередині хука — щоб уникнути зайвого запиту до БД
+ * при кожному підключенні файлу (require_once)
  */
-if (!wp_next_scheduled('crit_daily_log_rotation')) {
-	$first = time() + 300; // +5 хв — уникаємо накладання з ручним кліком
-	wp_schedule_event($first, 'daily', 'crit_daily_log_rotation');
-}
+add_action('plugins_loaded', function() {
+	if (!wp_next_scheduled('crit_daily_log_rotation')) {
+		$first = time() + 300; // +5 хв — уникаємо накладання з ручним кліком
+		wp_schedule_event($first, 'daily', 'crit_daily_log_rotation');
+	}
+});
 add_action('crit_daily_log_rotation', 'crit_rotate_logs');
 
 /**
@@ -261,7 +285,11 @@ function crit_log_admin_actions_router() {
 			exit;
 		}
 
-		// Перезапис без створення safety-бекапу
+		// Safety-бекап поточного активного логу перед перезаписом
+		if (file_exists($dest) && @filesize($dest) > 0) {
+			$safety_bak = $dest . '.pre-restore-' . gmdate('Ymd-His');
+			@copy($dest, $safety_bak);
+		}
 		$data = @file_get_contents($src);
 		$ok   = ($data !== false) ? @file_put_contents($dest, $data, LOCK_EX) : false;
 		if ($ok !== false) {
@@ -394,7 +422,7 @@ function crit_log_rotation_settings_page() {
 	echo '<div class="crit-kpi">'.esc_html($days_opt).' днів</div>';
 	echo '<div class="crit-sub">Макс. архівів: '.$keep_opt.' • Ліміт файлу: '.$size_opt.' МБ</div>';
 	if ($next_cron) {
-		echo '<div class="crit-sub" style="margin-top:6px">Наступний WP-Cron: '.esc_html(date_i18n('Y-m-d H:i:s', $next_crон)).'</div>';
+		echo '<div class="crit-sub" style="margin-top:6px">Наступний WP-Cron: '.esc_html(date_i18n('Y-m-d H:i:s', $next_cron)).'</div>';
 	}
 	echo '</div>';
 

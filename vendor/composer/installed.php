@@ -1,9 +1,9 @@
 <?php return array(
     'root' => array(
         'name' => 'fly380/critical-event-logger',
-        'pretty_version' => 'v2.1.2',
-        'version' => '2.1.2.0',
-        'reference' => 'db9ffbf55f3088c9a9eeab6ac904b5acb55dc7ed',
+        'pretty_version' => 'v1.1.1',
+        'version' => '1.1.1.0',
+        'reference' => 'd8be99f7dfffa97508639b19d9216dc7da893d49',
         'type' => 'wordpress-plugin',
         'install_path' => __DIR__ . '/../../',
         'aliases' => array(),
@@ -11,9 +11,9 @@
     ),
     'versions' => array(
         'fly380/critical-event-logger' => array(
-            'pretty_version' => 'v2.1.2',
-            'version' => '2.1.2.0',
-            'reference' => 'db9ffbf55f3088c9a9eeab6ac904b5acb55dc7ed',
+            'pretty_version' => 'v1.1.1',
+            'version' => '1.1.1.0',
+            'reference' => 'd8be99f7dfffa97508639b19d9216dc7da893d49',
             'type' => 'wordpress-plugin',
             'install_path' => __DIR__ . '/../../',
             'aliases' => array(),

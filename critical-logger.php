@@ -3,7 +3,7 @@
  * Plugin Name: Critical Event Logger
  * Plugin URI: https://github.com/fly380/critical-event-logger
  * Description: Логування критичних подій із швидким AJAX-переглядом, парсером «склеєних» рядків, частотністю IP, Geo/пул-визначенням, ручним блокуванням (.htaccess для Apache 2.2/2.4), ротацією й очищенням логів, GeoBlock та опційними AI-інсайтами.
- * Version: 1.1.1
+ * Version: 2.0
  * Author: Казмірчук Андрій
  * Author URI: https://www.facebook.com/fly380/
  * Text Domain: fly380
@@ -298,11 +298,28 @@ if (file_exists(plugin_dir_path(__FILE__) . 'privacy.php')) {
  * Розрізає сирий текст лога на окремі записи навіть якщо між ними немає \n
  * Кожен запис починається з мітки часу: [YYYY-MM-DD HH:MM:SS]
  */
+if (!function_exists('crit_split_log_entries')) {
 function crit_split_log_entries(string $raw): array {
 	$raw = trim($raw);
 	if ($raw === '') return [];
 	$parts = preg_split('/(?=\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\])/', $raw);
 	return array_values(array_filter(array_map('trim', $parts), static function($s){ return $s !== ''; }));
+}
+}
+
+/**
+ * Внутрішній діагностичний логер плагіна.
+ * Пише у PHP error_log (видно у debug.log при WP_DEBUG_LOG=true).
+ * Використовується лише для внутрішніх помилок файлових операцій і мережі —
+ * НЕ для запису подій безпеки (для цього є critical_logger_log()).
+ */
+if (!function_exists('crit_log_internal')) {
+	function crit_log_internal(string $message): void {
+		// Пишемо лише якщо WP_DEBUG увімкнено — щоб не смітити на продакшні
+		if (defined('WP_DEBUG') && WP_DEBUG) {
+			error_log('[CriticalLogger] ' . $message);
+		}
+	}
 }
 
 /**
@@ -600,9 +617,12 @@ function crit_tail_lines($file, $lines = 300) {
 	return array_values($chunks);
 }
 
-/* Обробники помилок */
-set_error_handler('critical_logger_error_handler');
-register_shutdown_function('critical_logger_shutdown_handler');
+/* Обробники помилок — реєструємо у plugins_loaded щоб не конфліктувати
+ * з іншими плагінами які теж можуть встановлювати свій error handler */
+add_action('plugins_loaded', function() {
+	set_error_handler('critical_logger_error_handler');
+	register_shutdown_function('critical_logger_shutdown_handler');
+}, 999); // пріоритет 999 — підключаємось останніми
 
 /* Адмін-меню */
 add_action('admin_menu', function() {
@@ -985,18 +1005,7 @@ function crit_get_ip_pool_via_cymru_bgp($ip) {
 	// Беремо перший CIDR типу a.b.c.d/n (це й буде "BGP Prefix")
 	if (preg_match('/\b(\d{1,3}(?:\.\d{1,3}){3}\/\d{1,2})\b/', $resp, $m)) {
 		list($pfx, $len) = explode('/', $m[1], 2);
-		if (!function_exists('crit_cidr_range_from_prefix')) {
-			// safety: якщо хелпер ще не визначений
-			function crit_cidr_range_from_prefix($prefixIp, $length) {
-				if (!filter_var($prefixIp, FILTER_VALIDATE_IP) || $length < 0 || $length > 32) return [null, null];
-				$start = ip2long($prefixIp);
-				if ($start === false) return [null, null];
-				$mask = $length == 0 ? 0 : ((~0 << (32 - $length)) & 0xFFFFFFFF);
-				$network = $start & $mask;
-				$broadcast = $network | (~$mask & 0xFFFFFFFF);
-				return [long2ip($network), long2ip($broadcast)];
-			}
-		}
+		// crit_cidr_range_from_prefix визначена глобально вище з if (!function_exists(...))
 		[$s, $e] = crit_cidr_range_from_prefix($pfx, (int)$len);
 		if ($s && $e) {
 			$range = $s . '-' . $e;
@@ -1211,8 +1220,8 @@ if (! function_exists('crit_ip_range_to_cidrs_safe')) {
 		if (! filter_var($start_ip, FILTER_VALIDATE_IP) || ! filter_var($end_ip, FILTER_VALIDATE_IP)) {
 			return [];
 		}
-		$start = sprintf('%u', ip2long($start_ip));
-		$end = sprintf('%u', ip2long($end_ip));
+		$start = (float) sprintf('%u', ip2long($start_ip));
+		$end   = (float) sprintf('%u', ip2long($end_ip));
 		if ($end < $start) return [];
 
 		$cidrs = [];
@@ -1356,8 +1365,24 @@ function crit_ip_range_to_ips($start_ip, $end_ip) {
 }
 
 /**
- * WHOIS fallback через ARIN для IP, які не знайшлися в RIPE (shell_exec)
- * (Залишено як крайній варіант для сумісності; у більшості випадків RDAP вирішить точніше)
+ * WHOIS fallback через shell_exec для IP, які не знайшлися через RDAP/RIPE/BGP.
+ * Залишено як крайній варіант — у більшості випадків RDAP вирішує точніше і безпечніше.
+ *
+ * ВИМКНЕНО за замовчуванням. Щоб увімкнути — додайте у wp-config.php:
+ *
+ *   define('CRIT_ALLOW_SHELL_WHOIS', true);
+ *
+ * Додатково можна вказати власний шлях до бінарника whois:
+ *
+ *   define('CRIT_WHOIS_BIN', '/usr/bin/whois');
+ *
+ * Вимоги до середовища:
+ *   - shell_exec() не має бути у disable_functions (php.ini)
+ *   - утиліта whois має бути встановлена на сервері (apt install whois / yum install whois)
+ *   - IP завжди передається через escapeshellarg() — ін'єкція неможлива
+ *
+ * @param string $ip  Валідна IPv4-адреса
+ * @return string     Діапазон вигляду "1.2.3.0-1.2.3.255" або порожній рядок
  */
 function crit_get_ip_pool_via_whois($ip) {
 	$cache_key = 'crit_pool_whois_' . md5($ip);
@@ -1488,6 +1513,9 @@ function crit_count_entries_in_file(string $file, int $chunkSize = 131072): int 
 
 /* Головна адмін-сторінка для перегляду логів */
 function critical_logger_admin_page() {
+	// Зберігаємо рівень буфера ДО нашого ob_start —
+	// щоб ob_end_flush закрив саме наш буфер, а не чужий (WP або інший плагін)
+	$ob_level_before = ob_get_level();
 	ob_start();
 // Збереження налаштування "Санітувати PII"
 if (
@@ -1860,7 +1888,7 @@ if (
 
 	if (! file_exists($log_file)) {
 		echo '<div class="notice notice-error"><p>Файл логів не знайдено: ' . esc_html($log_file) . '</p></div></div>';
-		if (ob_get_level()) ob_end_flush();
+		if (ob_get_level() > $ob_level_before) ob_end_flush();
 		return;
 	}
 
@@ -2115,7 +2143,7 @@ $('#crit-level-none').on('click', function(e){
 
 	<?php
 
-	if (ob_get_level()) ob_end_flush();
+	if (ob_get_level() > $ob_level_before) ob_end_flush();
 }
 // При деактивації — прибираємо крон завдання ротації
 register_deactivation_hook(__FILE__, function(){

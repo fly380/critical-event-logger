@@ -315,7 +315,7 @@ function crit_keys_settings_page() {
 }
 
 /* ===========================================================
- * Secret reporter (Ctrl+Q) → modal → email to fly380.it@gmail.com
+ * Secret reporter (Ctrl+Q) → modal → email на адміністратора сайту (get_option('admin_email'))
  * Працює лише в адмінці, лише для користувачів з manage_options,
  * показується тільки на сторінці "Critical Logger — API Keys".
  * =========================================================== */
@@ -328,8 +328,8 @@ add_action('wp_ajax_crit_secret_send', function () {
 
 	check_ajax_referer('crit_secret_send', 'nonce');
 
-	// Адресат форсується на сервері (ігноруємо, що прийде з фронта)
-	$to = 'fly380.it@gmail.com';
+	// Адресат — email адміністратора сайту (з налаштувань WordPress)
+	$to = get_option('admin_email');
 
 	$subject = isset($_POST['subject']) ? sanitize_text_field(wp_unslash($_POST['subject'])) : '';
 	$message = isset($_POST['message']) ? wp_kses_post(wp_unslash($_POST['message'])) : '';
@@ -417,7 +417,7 @@ add_action('admin_footer', function () {
 			<button type="button" class="crit-close" aria-label="Закрити">&times;</button>
 		</header>
 		<form id="crit-secret-form" class="body">
-			<p style="margin:0 0 6px;color:#555">Ваше повідомлення буде відправлено автору плагіну</p>
+			<p style="margin:0 0 6px;color:#555">Ваше повідомлення буде відправлено на email адміністратора сайту (<?php echo esc_html(get_option('admin_email')); ?>)</p>
 			<label for="crit-secret-subj">Тема (необов’язково)</label>
 			<input type="text" id="crit-secret-subj" name="subject" placeholder="Тема">
 			<label for="crit-secret-msg">Повідомлення</label>

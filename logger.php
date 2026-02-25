@@ -83,9 +83,17 @@ function critical_logger_log($message, $level = 'INFO') {
 
 	// Приводимо рівень до верхнього регістру
 	$level = strtoupper($level);
-	$log = "[$datetime][$ip][$username][$level] $message\n";
+	$log = "[$datetime][$ip][$username][$level] $message";
 
-	error_log($log, 3, $log_file);
+	// crit_append_log_line використовує LOCK_EX і гарантує перенос рядка —
+	// на відміну від error_log() який не блокує файл і може склеювати рядки
+	// при паралельних запитах. Якщо функція ще не завантажена (logger.php
+	// підключається раніше critical-logger.php) — fallback на file_put_contents з LOCK_EX
+	if (function_exists('crit_append_log_line')) {
+		crit_append_log_line($log_file, $log);
+	} else {
+		@file_put_contents($log_file, $log . "\n", FILE_APPEND | LOCK_EX);
+	}
 }
 
 /**
@@ -134,7 +142,9 @@ function critical_logger_shutdown_handler() {
 		critical_logger_log("FATAL ERROR: {$error['message']} in {$error['file']} on line {$error['line']}", 'FATAL');
 	}
 }
-// Час для логів у часовому поясі сайту (WP Settings → General → Timezone)
+// crit_log_time() визначена у critical-logger.php з повним коментарем.
+// logger.php завантажується першим, тому тут лише мінімальний fallback
+// на випадок якщо critical-logger.php ще не підключений.
 if (!function_exists('crit_log_time')) {
 	function crit_log_time(string $format = 'Y-m-d H:i:s'): string {
 		return function_exists('wp_date') ? wp_date($format) : date($format);

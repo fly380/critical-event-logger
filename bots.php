@@ -240,8 +240,15 @@ function crit_is_allowed_bot(): bool {
 	if (!$enabled) return false;
 
 	$ua = $_SERVER['HTTP_USER_AGENT'] ?? '';
-	$ip = $_SERVER['REMOTE_ADDR'] ?? '';
-	if ($ua === '' || $ip === '') return false;
+	if ($ua === '') return false;
+
+	// Використовуємо реальний IP (враховує X-Forwarded-For / CF-Connecting-IP)
+	// REMOTE_ADDR може бути IP проксі — тоді rDNS-перевірка Googlebot завжди провалюється
+	$ip = function_exists('crit_geoblock_client_ip')
+		? crit_geoblock_client_ip()
+		: (string) ($_SERVER['REMOTE_ADDR'] ?? '');
+
+	if ($ip === '') return false;
 
 	$reg = crit_bots_registry();
 	$candidates = [];
@@ -278,7 +285,14 @@ function crit_is_allowed_bot(): bool {
 function crit_apply_bot_htaccess_policy(): bool {
 	$enabled = crit_bot_opts();
 	$reg     = crit_bots_registry();
-	$path = ABSPATH . '.htaccess';
+
+	// Використовуємо crit_ht_get_path() з htaccess-blocklist.php — коректно
+	// враховує subdirectory WordPress install через get_home_path().
+	// Fallback на ABSPATH якщо функція ще не завантажена.
+	$path = function_exists('crit_ht_get_path')
+		? crit_ht_get_path()
+		: ABSPATH . '.htaccess';
+
 	if (!file_exists($path) || !is_readable($path)) return false;
 	if (!is_writable($path)) return false;
 
@@ -342,7 +356,10 @@ function crit_bots_allow_page() {
 
 	$reg   = crit_bots_registry();
 	$ua    = (string) ($_SERVER['HTTP_USER_AGENT'] ?? '');
-	$ip    = (string) ($_SERVER['REMOTE_ADDR'] ?? '');
+	// Реальний IP (враховує проксі) — той самий що використовує crit_is_allowed_bot()
+	$ip    = function_exists('crit_geoblock_client_ip')
+		? crit_geoblock_client_ip()
+		: (string) ($_SERVER['REMOTE_ADDR'] ?? '');
 	$match = crit_bots_matched_for_ua($ua);
 
 	// Save

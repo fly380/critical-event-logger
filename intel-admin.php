@@ -20,14 +20,23 @@ add_action('wp_ajax_critical_logger_intel_table', function () {
 	$log_file = crit_log_file();
 	if (!file_exists($log_file)) wp_send_json_error('Лог-файл не знайдено', 404);
 
-	$all_lines = file($log_file, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+	// Читаємо потоково — не вантажимо весь лог у RAM
 	$ip_counts = [];
-	foreach ($all_lines as $ln) {
-		if (preg_match('/\b(?:\d{1,3}\.){3}\d{1,3}\b/', $ln, $m)) {
-			$ip_counts[$m[0]] = ($ip_counts[$m[0]] ?? 0) + 1;
+	$fh = @fopen($log_file, 'r');
+	if ($fh) {
+		while (($ln = fgets($fh)) !== false) {
+			if (preg_match('/\b(?:\d{1,3}\.){3}\d{1,3}\b/', $ln, $m)) {
+				$ip_counts[$m[0]] = ($ip_counts[$m[0]] ?? 0) + 1;
+			}
 		}
+		fclose($fh);
 	}
 	arsort($ip_counts);
+
+	// Обмежуємо топ-50: більше IP = сотні HTTP-запитів до AbuseIPDB/VT
+	$limit     = 50;
+	$total_ips = count($ip_counts);
+	$ip_counts = array_slice($ip_counts, 0, $limit, true);
 
 	ob_start();
 	echo '<table class="widefat striped" style="width:100%;">';
@@ -45,7 +54,6 @@ add_action('wp_ajax_critical_logger_intel_table', function () {
 			if (!empty($intel['abuseipdb'])) $details[] = 'AbuseIPDB (' . $intel['abuseipdb'] . '%)';
 			if (!empty($intel['virustotal'])) $details[] = 'VirusTotal (' . $intel['virustotal'] . ' детектів)';
 			if (!empty($intel['spamhaus']))   $details[] = 'Spamhaus';
-			// CrowdSec — повністю прибрано
 			$details_str = $details ? implode(', ', $details) : '-';
 
 			$row_style = $score >= 60 ? 'background:#ffd7d7;' : ($score >= 20 ? 'background:#fff4cc;' : 'background:#eaffea;');
@@ -63,6 +71,9 @@ add_action('wp_ajax_critical_logger_intel_table', function () {
 	}
 
 	echo '</tbody></table>';
+	if ($total_ips > $limit) {
+		echo '<p style="color:#64748b;font-size:12px;margin:6px 0 0;">Показано топ ' . $limit . ' з ' . $total_ips . ' унікальних IP.</p>';
+	}
 	$html = ob_get_clean();
 	wp_send_json_success(['html' => $html]);
 });

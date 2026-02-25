@@ -29,17 +29,8 @@ if (!function_exists('crit_get_option_or_const')) {
 	}
 }
 
-// Звідси й далі у всьому файлі використовуй ці змінні, а НЕ constant('CRIT_*')
-$abuse_key = crit_get_option_or_const('CRIT_ABUSEIPDB_KEY', 'crit_abuseipdb_key');
-$vt_key    = crit_get_option_or_const('CRIT_VIRUSTOTAL_KEY', 'crit_virustotal_key');
-// $cs_key  — повністю прибрано
-$ai_key    = crit_get_option_or_const('CRIT_OPENAI_KEY', 'crit_openai_key');
-
-// зробимо їх доступними у функціях через global
-$GLOBALS['CL_ABUSE_KEY'] = $abuse_key;
-$GLOBALS['CL_VT_KEY']    = $vt_key;
-// $GLOBALS['CL_CS_KEY']  — прибрано
-$GLOBALS['CL_AI_KEY']    = $ai_key;
+// Ключі читаються безпосередньо у функціях через crit_get_option_or_const()
+// Глобальні змінні прибрано — щоб уникнути залежності від порядку підключення файлів
 
 /**
  * Отримати IP, що часто з’являються у логах (для аналітики)
@@ -68,8 +59,8 @@ function crit_check_ip_intel($ip) {
 	$cache_key = 'crit_intel_' . md5($ip);
 	if ($cached = get_transient($cache_key)) return $cached;
 
-	$abuse_key = $GLOBALS['CL_ABUSE_KEY'] ?? '';
-	$vt_key    = $GLOBALS['CL_VT_KEY']    ?? '';
+	$abuse_key = crit_get_option_or_const('CRIT_ABUSEIPDB_KEY', 'crit_abuseipdb_key');
+	$vt_key    = crit_get_option_or_const('CRIT_VIRUSTOTAL_KEY', 'crit_virustotal_key');
 
 	$result = array(
 		'ip'           => $ip,
@@ -144,12 +135,29 @@ function crit_check_ip_intel($ip) {
 		}
 	}
 
-	// === Spamhaus DNSBL ===
-	$rev = implode('.', array_reverse(explode('.', $ip))) . '.zen.spamhaus.org';
-	if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) && checkdnsrr($rev, 'A')) {
-		$result['spamhaus'] = true;
-		$sources[] = 'Spamhaus';
-		$result['is_malicious'] = true;
+	// === Spamhaus DNSBL (лише IPv4, з кешем і захистом від зависання) ===
+	if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+		$spam_key = 'crit_spamhaus_' . md5($ip);
+		$spam_cached = get_transient($spam_key);
+
+		if ($spam_cached !== false) {
+			// Використовуємо кешований результат (true/false)
+			$in_spamhaus = (bool) $spam_cached;
+		} else {
+			$rev = implode('.', array_reverse(explode('.', $ip))) . '.zen.spamhaus.org';
+			// gethostbyname повертає IP якщо знайдено, або той самий рядок якщо ні
+			// Значно швидший за checkdnsrr, вбудований таймаут ОС (~5с)
+			$lookup     = @gethostbyname($rev);
+			$in_spamhaus = ($lookup !== $rev && filter_var($lookup, FILTER_VALIDATE_IP));
+			// Кешуємо: позитив — 6 год, негатив — 1 год
+			set_transient($spam_key, $in_spamhaus ? 1 : 0, $in_spamhaus ? 6 * HOUR_IN_SECONDS : HOUR_IN_SECONDS);
+		}
+
+		if ($in_spamhaus) {
+			$result['spamhaus'] = true;
+			$sources[]          = 'Spamhaus';
+			$result['is_malicious'] = true;
+		}
 	}
 
 	// === Підсумковий SCORE ===

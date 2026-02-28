@@ -247,7 +247,7 @@ function crit_geoblock_get_countries() {
 }
 
 /**
- * Консенсус GEO: CF (якщо є) + ip-api (pro/country.is) + ipwho.is + ipapi.co
+ * Консенсус GEO: CF (якщо є) + ip-api.com + ipwho.is + ipapi.co + ipgeolocationapi.com
  * Повертає: ['code'=>'UA','confident'=>true/false,'sources'=>['cf'=>'UA','ipapi'=>'UA',...]]
  * Впевненість: ≥2 збіги, або CF збігається з будь-яким іншим.
  * TTL: confident → cache_ttl_hours; інакше → min(10 хв, cache_ttl_hours)
@@ -268,34 +268,20 @@ function crit_geoblock_country_consensus(string $ip): array {
 		if (preg_match('/^[A-Z]{2}$/', $cf)) $sources['cf'] = $cf;
 	}
 
-	// ip-api → HTTPS: pro.ip-api.com (з ключем) або country.is (без ключа)
-	$ipapi_pro_key = defined('CRIT_IPAPI_PRO_KEY') ? CRIT_IPAPI_PRO_KEY : '';
-	if (!empty($ipapi_pro_key)) {
-		$r1 = wp_remote_get(
-			sprintf('https://pro.ip-api.com/json/%s?fields=status,countryCode&key=%s', rawurlencode($ip), rawurlencode($ipapi_pro_key)),
-			['timeout' => 6]
-		);
-		if (!is_wp_error($r1)) {
-			$d1 = json_decode(wp_remote_retrieve_body($r1), true);
-			if (($d1['status'] ?? '') === 'success' && !empty($d1['countryCode'])) {
-				$sources['ipapi'] = strtoupper($d1['countryCode']); // зберігаємо ключ 'ipapi'
-			}
-		}
-	} else {
-		$r1 = wp_remote_get(sprintf('https://country.is/%s', rawurlencode($ip)), ['timeout'=>6]);
-		if (!is_wp_error($r1)) {
-			$d1 = json_decode(wp_remote_retrieve_body($r1), true);
-			if (!empty($d1['country']) && preg_match('/^[A-Z]{2}$/', strtoupper($d1['country']))) {
-				$sources['ipapi'] = strtoupper($d1['country']);
-			}
+	// ip-api.com (безкоштовний, без ключа)
+	$r1 = wp_remote_get("http://ip-api.com/json/{$ip}?fields=status,countryCode", ['timeout'=>6]);
+	if (!is_wp_error($r1)) {
+		$d1 = json_decode(wp_remote_retrieve_body($r1), true);
+		if (($d1['status'] ?? '') === 'success' && !empty($d1['countryCode'])) {
+			$sources['ipapi'] = strtoupper($d1['countryCode']);
 		}
 	}
 
 	// ipwho.is
-	$r2 = wp_remote_get("https://ipwho.is/{$ip}", ['timeout'=>6]);
+	$r2 = wp_remote_get("https://ipwho.is/{$ip}?fields=country_code", ['timeout'=>6]);
 	if (!is_wp_error($r2)) {
 		$d2 = json_decode(wp_remote_retrieve_body($r2), true);
-		if (!empty($d2['success']) && !empty($d2['country_code'])) {
+		if (!empty($d2['country_code'])) {
 			$sources['ipwho'] = strtoupper($d2['country_code']);
 		}
 	}
@@ -305,6 +291,15 @@ function crit_geoblock_country_consensus(string $ip): array {
 	if (!is_wp_error($r3)) {
 		$raw = strtoupper(trim(wp_remote_retrieve_body($r3)));
 		if (preg_match('/^[A-Z]{2}$/', $raw)) $sources['ipapi_co'] = $raw;
+	}
+
+	// ipgeolocationapi.com (безкоштовний, без ключа)
+	$r4 = wp_remote_get("https://api.ipgeolocationapi.com/country/ip/{$ip}", ['timeout'=>4]);
+	if (!is_wp_error($r4)) {
+		$d4 = json_decode(wp_remote_retrieve_body($r4), true);
+		if (!empty($d4['alpha2'])) {
+			$sources['ipgeo'] = strtoupper($d4['alpha2']);
+		}
 	}
 
 	// Підрахунок голосів
@@ -332,8 +327,11 @@ function crit_geoblock_country_consensus(string $ip): array {
 					break;
 				}
 			}
+		} else {
+			// Якщо немає 2+ збігів і немає CF, але є хоча б одне джерело - використовуємо його
+			$code = $top;
+			// Не впевнено, але маємо хоч якесь значення
 		}
-		// Якщо впевненості немає — залишаємо code='??' щоб fail_open спрацював
 	}
 
 	$res['code']      = $code;
@@ -353,13 +351,21 @@ function crit_geoblock_country_consensus(string $ip): array {
 
 /** Ефективний код країни з урахуванням strict_consensus */
 function crit_geoblock_get_country($ip) {
-	$cons   = crit_geoblock_country_consensus($ip);
-	$strict = (bool) crit_geoblock_get_opt('strict_consensus', false);
+	$cons    = crit_geoblock_country_consensus($ip);
+	$strict  = (bool) crit_geoblock_get_opt('strict_consensus', false);
+	$reverse = (bool) crit_geoblock_get_opt('reverse', false);
 
-	// Без впевненості завжди повертаємо '??' — fail_open у should_block вирішить пропустити чи заблокувати.
-	// strict_consensus лише підкреслює цю поведінку (залишено для сумісності з UI).
-	if (!$cons['confident'] || ($strict && !$cons['confident'])) {
-		return '??';
+	if (!$cons['confident']) {
+		// Whitelist-режим: невідома/невпевнена країна = не в списку дозволених = блокуємо.
+		if ($reverse) {
+			return '??'; // should_block: ?? + reverse → block=true (не в списку дозволених)
+		}
+		// Blacklist + strict: ?? → fail_open вирішить
+		if ($strict) {
+			return '??';
+		}
+		// Blacklist без strict: повертаємо код якщо є хоч одне джерело
+		return $cons['code'] ?? '??';
 	}
 
 	return $cons['code'] ?? '??';
@@ -386,7 +392,12 @@ function crit_geoblock_should_block($ip, $country): array {
 
 	// 3) GEO
 	if ($country === '??') {
-		return ['block'=> !$failOpen, 'reason'=> $failOpen ? 'geo-fail-open' : 'geo-fail-closed'];
+		if ($reverse) {
+			// Whitelist-режим: невідома країна = не підтверджена = не в списку дозволених → блокуємо.
+			return ['block' => true, 'reason' => 'geo-unknown-not-in-whitelist'];
+		}
+		// Blacklist-режим: невідома країна → fail_open вирішує
+		return ['block' => !$failOpen, 'reason' => $failOpen ? 'geo-fail-open' : 'geo-fail-closed'];
 	}
 	if ($reverse) {
 		return ['block'=> !in_array($country, $list, true), 'reason'=> in_array($country,$list,true) ? 'geo-allow' : 'geo-not-in-allow'];
@@ -447,6 +458,9 @@ function crit_geoblock_send_response($mode, $ip, $country) {
 function crit_geoblock_maybe_block() {
 	static $ran = false; if ($ran) return; $ran = true;
 
+	// Перевіряємо чи увімкнений GeoBlock
+	if (!crit_geoblock_get_opt('enabled', false)) return;
+
 	if (is_admin()) return;
 	if (defined('DOING_AJAX') && DOING_AJAX) return;
 	if (defined('DOING_CRON') && DOING_CRON) return;
@@ -466,18 +480,26 @@ function crit_geoblock_maybe_block() {
 	$verdict = crit_geoblock_should_block($ip, $country);
 	$preview = (bool) crit_geoblock_get_opt('preview_only', false);
 
-	if (!empty($verdict['block'])) {
-		// --- коротке логування + маркер бота ---
-		$log_file = function_exists('crit_log_file') ? crit_log_file() : '';
-		$ua_raw  = $_SERVER['HTTP_USER_AGENT'] ?? '';
-		$bot_tag = function_exists('crit_geoblock_bot_tag_string') ? crit_geoblock_bot_tag_string($ua_raw) : '';
+	// --- коротке логування + маркер бота ---
+	$log_file = function_exists('crit_log_file') ? crit_log_file() : '';
+	$ua_raw  = $_SERVER['HTTP_USER_AGENT'] ?? '';
+	$bot_tag = function_exists('crit_geoblock_bot_tag_string') ? crit_geoblock_bot_tag_string($ua_raw) : '';
 
-		if ($preview) {
-			if ($log_file) { @file_put_contents($log_file, '[' . (function_exists('crit_log_time') ? crit_log_time() : gmdate('c')) . "][GeoBlock][$country][INFO] ПРЕВʼЮ: Заблоковано вхід з країни $country ($ip)$bot_tag\n", FILE_APPEND | LOCK_EX); }
-			return;
+	if (!empty($verdict['block'])) {
+		if ($log_file) {
+			$level = $preview ? 'INFO' : 'WARN';
+			$prefix = $preview ? 'ПРЕВʼЮ: ' : '';
+			@file_put_contents(
+				$log_file,
+				'[' . (function_exists('crit_log_time') ? crit_log_time() : gmdate('c')) . "][GeoBlock][$country][$level] {$prefix}Заблоковано вхід з країни $country ($ip)$bot_tag\n",
+				FILE_APPEND | LOCK_EX
+			);
 		}
 
-		if ($log_file) { @file_put_contents($log_file, '[' . (function_exists('crit_log_time') ? crit_log_time() : gmdate('c')) . "][GeoBlock][$country][WARN] Заблоковано вхід з країни $country ($ip)$bot_tag\n", FILE_APPEND | LOCK_EX); }
+		// Якщо preview_only - не блокуємо, тільки логуємо
+		if ($preview) {
+			return;
+		}
 
 		crit_geoblock_send_response((string) crit_geoblock_get_opt('response_mode','403'), $ip, $country);
 	}
@@ -778,7 +800,7 @@ echo '<div id="crit-geo-info-modal" role="dialog" aria-modal="true" aria-labelle
       </ul>
       <h3>Як визначається країна</h3>
       <ul>
-        <li>Джерела: <code>HTTP_CF_IPCOUNTRY</code> (за Cloudflare), <code>ip-api.com</code>, <code>ipwho.is</code>, <code>ipapi.co</code>.</li>
+        <li>Джерела: <code>HTTP_CF_IPCOUNTRY</code> (за Cloudflare), <code>ip-api.com</code>, <code>ipwho.is</code>, <code>ipapi.co</code>, <code>ipgeolocationapi.com</code>.</li>
         <li><strong>Впевненість</strong>: ≥2 збіги, або <code>Cloudflare</code> збігся з будь-яким іншим.</li>
         <li><strong>Strict consensus</strong> (опція): якщо увімкнено — блок/дозвіл базується лише на «впевнених» визначеннях.</li>
         <li>Коли невпевнено або країна <code>??</code> — діє <em>Fail-Open</em>, якщо увімкнено.</li>
